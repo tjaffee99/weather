@@ -8,7 +8,7 @@ An interactive world weather map with two views:
   - **Right now**: the same conditions checked against the latest NOAA GFS forecast, at the current hour or any hour in the next 3 days, to show where it is nice right now. Temperatures are the current reading (terrain-adjusted), precipitation is the current rate, and sea temperature comes from the model's sea surface. Sliders update the map instantly on the GPU, and matching cities get a ✓ with their temperature.
 
   Tap anywhere to get a location card. It shows the chance through the year, the best months, and monthly normals (highs, lows, sunny days, rain days, precipitation, snow days, wind and sea temperature).
-- **Live weather**: the latest NOAA GFS model run as a smooth temperature field (plus feels-like, precipitation, clouds, wind with animated streaks, humidity and snow depth). It has an hourly forecast scrubber with cross-fading and city temperature labels. When you zoom in, temperatures are downscaled to the terrain, so individual valleys and ridges show up. Tap the map for a point forecast: current conditions plus the next 24 hours in 3-hour steps.
+- **Live weather**: the latest NOAA GFS model run as a smooth temperature field, with an Actual / Feels like toggle. The other layers are precipitation, clouds (blue where the sky is clear, white where it is overcast), snow depth, wind with animated streaks, and humidity. It has an hourly forecast scrubber with cross-fading and city temperature labels. When you zoom in, temperatures are downscaled to the terrain, so individual valleys and ridges show up. Snow depth uses the 3 km HRRR model over the US and Alaska, is shaped by terrain elsewhere, and shows glaciers worldwide. Tap the map for a point forecast: current conditions plus the next 24 hours in 3-hour steps.
 
 ## How it works
 
@@ -19,6 +19,8 @@ An interactive world weather map with two views:
 ### Live data
 
 GFS 0.25° GRIB2 files are fetched directly from NOAA's public AWS bucket, which allows CORS range requests. The app reads the `.idx` inventory and downloads only the bytes for the fields it needs, about 0.5–1 MB per global field. It decodes them in a Web Worker with a small GRIB2 decoder (`src/live/grib2.ts`, complex packing with spatial differencing), which is tested against ecCodes. No server or API key is needed, and the data is always current.
+
+Snow depth over the contiguous US and Alaska comes from NOAA's 3 km [HRRR](https://rapidrefresh.noaa.gov/hrrr/) model, fetched the same way (`src/live/hrrr.ts`). Its grids are Lambert conformal and polar stereographic, so the shader projects each pixel onto the native grid instead of resampling, and fades it into GFS at the domain edges. Elsewhere, GFS snow is shaped by terrain within each model cell: about e times deeper for every 700 m above the cell's mean elevation, capped at 4× and floored at 0.1×. Glaciers come from the basemap's vector tiles (Natural Earth at low zoom, OpenStreetMap outlines when zoomed in), because 0.25° models miss most of them.
 
 ### Climate data
 
@@ -43,7 +45,7 @@ Coastal cells use land-weighted averages. ERA5 reports light rain far too often 
 ```bash
 npm install
 npm run dev        # http://localhost:5173
-npm test           # GRIB2 decoder + climate codec round-trip tests
+npm test           # GRIB2 decoder (GFS + HRRR grids) + climate codec round-trip tests
 npm run build      # static site in dist/
 ```
 
@@ -67,7 +69,7 @@ Live at **https://weather.theojaffee.net** (`public/CNAME`; DNS: `weather` CNAME
 
 ## Data & credits
 
-- Forecast: NOAA Global Forecast System (public domain), via the NOAA Open Data Dissemination program on AWS
+- Forecast: NOAA Global Forecast System and High-Resolution Rapid Refresh (public domain), via the NOAA Open Data Dissemination program on AWS
 - Climate: Copernicus Climate Change Service ERA5 reanalysis (Hersbach et al. 2020), via Google's ARCO-ERA5
 - Point forecasts in the location card: Open-Meteo (CC BY 4.0); place names and boundaries: OpenStreetMap Nominatim
 - Basemap: OpenFreeMap / OpenMapTiles / © OpenStreetMap contributors; low-zoom coastlines: Natural Earth

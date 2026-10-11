@@ -11,6 +11,7 @@
  */
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MlMap } from 'maplibre-gl';
 import { domain, rasterize, type Palette } from './palettes';
+import type { ConicGrid } from '../live/hrrr';
 
 export interface GridSpec {
   nx: number;
@@ -48,6 +49,10 @@ uniform vec4 u_mrange[10];       // lo, hi, softness, kind (0 plain, 1 temperatu
 uniform float u_mdoy;
 uniform sampler2D u_ldem;       // viewport high-res elevation (m)
 uniform vec4 u_ldemExt;         // its mercator extent x0,y0,x1,y1 (x1 <= x0: none)
+uniform sampler2D u_reg0;       // live: high-resolution regional fields on conic grids
+uniform sampler2D u_reg1;
+uniform vec4 u_rcone[2];        // n, k (m), central meridian (deg), weight (0: off)
+uniform vec4 u_rgrid[2];        // first grid point x, y and spacing dx, dy (m)
 
 uniform vec4 u_grid;           // lon0, lat0, dx, dy
 uniform vec2 u_gridSize;
@@ -58,6 +63,7 @@ uniform float u_mix;
 uniform vec2 u_domain;
 uniform int u_log;
 uniform float u_lapse;
+uniform float u_snowH;         // live snow depth: terrain scale height (m), 0 = off
 uniform float u_useAlt;
 uniform float u_opacity;
 uniform float u_cut;           // climate: values below are dimmed
@@ -115,6 +121,22 @@ float demElev(float lon, float lat) {
   return mix(g, l, smoothstep(0.0, 0.06, min(e.x, e.y)));
 }
 
+// Blend in a regional field on a polar stereographic / Lambert conformal grid:
+// x = rho sin(n dLon), y = -rho cos(n dLon), rho = k / tan(pi/4 + lat/2)^n
+float regional(float v, sampler2D t, vec4 cone, vec4 g, float lon, float lat) {
+  if (cone.w <= 0.0 || lat < 1.0) return v;
+  float dl = mod(lon - cone.z + 540.0, 360.0) - 180.0;
+  float rho = cone.y / pow(tan(PI / 4.0 + radians(lat) * 0.5), cone.x);
+  float th = cone.x * radians(dl);
+  vec2 ij = (vec2(rho * sin(th), -rho * cos(th)) - g.xy) / g.zw;
+  vec2 size = vec2(textureSize(t, 0));
+  vec2 e = min(ij, size - 1.0 - ij);
+  float edge = min(e.x, e.y);
+  if (edge <= 0.0) return v;
+  float r = bicubic(t, (ij + 0.5) / size).r;
+  return mix(v, r, smoothstep(0.0, 16.0, edge) * cone.w);
+}
+
 vec4 shade(float v, float altMix) {
   float x = u_log == 1 ? log(max(v, 1e-4)) : v;
   float t = clamp((x - u_domain.x) / (u_domain.y - u_domain.x), 0.0, 1.0);
@@ -144,6 +166,13 @@ void main() {
       float zg = bicubic(u_orog, uv).r;
       v += u_lapse * (zg - demElev(lon, lat));
     }
+    if (u_snowH > 0.0) {
+      // deeper on ridges, thinner in valleys than the model cell's mean elevation
+      float dz = demElev(lon, lat) - bicubic(u_orog, uv).r;
+      v *= clamp(exp(dz / u_snowH), 0.1, 4.0);
+    }
+    v = regional(v, u_reg0, u_rcone[0], u_rgrid[0], lon, lat);
+    v = regional(v, u_reg1, u_rcone[1], u_rgrid[1], lon, lat);
     float altMix = u_useAlt > 0.0 ? smoothstep(0.25, 0.75, bicubic(u_alt, uv).r) : 0.0;
     col = shade(v, altMix);
   } else if (u_mode == 2) {
@@ -212,8 +241,8 @@ const UNIFORMS = [
   'u_projection_transition', 'u_projection_fallback_matrix', 'u_offset',
   'u_mode', 'u_fieldA', 'u_fieldB', 'u_alt', 'u_orog', 'u_dem', 'u_palette', 'u_result', 'u_cellElev',
   'u_grid', 'u_gridSize', 'u_cgrid', 'u_cgridSize', 'u_levels', 'u_mix', 'u_domain', 'u_log',
-  'u_lapse', 'u_useAlt', 'u_opacity', 'u_cut', 'u_ldem', 'u_ldemExt',
-  'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy',
+  'u_lapse', 'u_snowH', 'u_useAlt', 'u_opacity', 'u_cut', 'u_ldem', 'u_ldemExt',
+  'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy', 'u_reg0', 'u_reg1', 'u_rcone', 'u_rgrid',
 ];
 
 export class FieldLayer implements CustomLayerInterface {
@@ -236,6 +265,8 @@ export class FieldLayer implements CustomLayerInterface {
   mode: 0 | 1 | 2 = 0;
   mix = 0;
   lapse = 0;
+  /** live snow depth: terrain scale height in metres (0 = off) */
+  snowH = 0;
   useAlt = 0;
   opacity = 1;
   /** climate mode: normalised value below which results are dimmed (0 = off) */
@@ -254,6 +285,7 @@ export class FieldLayer implements CustomLayerInterface {
   private mranges = new Float32Array(40);
   private mdoy = 0;
   private ldemExt: [number, number, number, number] = [0, 0, 0, 0];
+  private reg: (ConicGrid | null)[] = [null, null];
 
   constructor(id: string) {
     this.id = id;
@@ -396,6 +428,21 @@ export class FieldLayer implements CustomLayerInterface {
     this.repaint();
   }
 
+  /**
+   * High-resolution regional field (e.g. HRRR snow over the US) blended over
+   * the live field where it has data; null removes it.
+   */
+  setRegional(slot: 0 | 1, r: { grid: ConicGrid; values: Float32Array } | null) {
+    if (r) {
+      const gl = this.gl!;
+      const key = `reg${slot}`;
+      this.tex[key] = this.makeTex2D(r.grid.nx, r.grid.ny, r.values, 1, this.tex[key]);
+      this.setParams(gl.TEXTURE_2D, gl.CLAMP_TO_EDGE);
+    }
+    this.reg[slot] = r ? r.grid : null;
+    this.repaint();
+  }
+
   /** Upload a live model field into slot A or B. */
   setField(slot: 'fieldA' | 'fieldB' | 'alt' | 'orog', grid: GridSpec, values: Float32Array) {
     this.grid = grid;
@@ -529,6 +576,16 @@ export class FieldLayer implements CustomLayerInterface {
     bind(7, 'cellElev', gl.TEXTURE_2D, 'u_cellElev');
     bind(8, 'ldem', gl.TEXTURE_2D, 'u_ldem');
     bind(9, 'mfields', gl.TEXTURE_2D_ARRAY, 'u_mfields');
+    bind(10, 'reg0', gl.TEXTURE_2D, 'u_reg0');
+    bind(11, 'reg1', gl.TEXTURE_2D, 'u_reg1');
+    const rc = new Float32Array(8), rg = new Float32Array(8);
+    this.reg.forEach((g, i) => {
+      if (!g || this.mode !== 0) return;
+      rc.set([g.n, g.k, g.lov, 1], i * 4);
+      rg.set([g.x1, g.y1, g.dx, g.dy], i * 4);
+    });
+    gl.uniform4fv(p.u.u_rcone, rc);
+    gl.uniform4fv(p.u.u_rgrid, rg);
     gl.uniform1i(p.u.u_mcount, this.mcount);
     gl.uniform4fv(p.u.u_mrange, this.mranges);
     gl.uniform1f(p.u.u_mdoy, this.mdoy);
@@ -546,6 +603,7 @@ export class FieldLayer implements CustomLayerInterface {
     gl.uniform2f(p.u.u_domain, this.paletteDomain[0], this.paletteDomain[1]);
     gl.uniform1i(p.u.u_log, this.paletteLog ? 1 : 0);
     gl.uniform1f(p.u.u_lapse, this.lapse);
+    gl.uniform1f(p.u.u_snowH, this.mode === 0 ? this.snowH : 0);
     gl.uniform1f(p.u.u_useAlt, this.useAlt);
     gl.uniform1f(p.u.u_opacity, this.opacity * this.fade);
     gl.uniform1f(p.u.u_cut, this.mode === 1 ? this.cut : 0);

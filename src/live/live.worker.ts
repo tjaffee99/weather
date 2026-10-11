@@ -1,11 +1,14 @@
 /// <reference lib="webworker" />
 import { fetchField, NO_SEA, type Cycle, type LiveVar } from './gfs';
+import { hrrrSnow, type ConicGrid, type HrrrDomain } from './hrrr';
 
 export interface LiveRequest {
   id: number;
   cycle: Cycle;
   fh: number;
   v: LiveVar;
+  /** instead of a GFS field: HRRR snow depth for this domain at valid time t */
+  hrrr?: { domain: HrrrDomain; t: number };
 }
 export interface LiveResponse {
   id: number;
@@ -17,11 +20,19 @@ export interface LiveResponse {
   vv?: Float32Array;
   nx?: number;
   ny?: number;
+  /** HRRR responses: the projected grid (values are absent when no run covers the time) */
+  grid?: ConicGrid;
 }
 
 self.onmessage = async (e: MessageEvent<LiveRequest>) => {
-  const { id, cycle, fh, v } = e.data;
+  const { id, cycle, fh, v, hrrr } = e.data;
   try {
+    if (hrrr) {
+      const r = await hrrrSnow(hrrr.domain, hrrr.t);
+      const msg: LiveResponse = r ? { id, values: r.values, grid: r.grid, nx: r.grid.nx, ny: r.grid.ny } : { id };
+      (self as unknown as Worker).postMessage(msg, r ? [r.values.buffer] : []);
+      return;
+    }
     if (v === 'sun') {
       const out = await sunshineHours(cycle, fh);
       (self as unknown as Worker).postMessage({ id, values: out, nx: 1440, ny: 721 } satisfies LiveResponse, [out.buffer]);

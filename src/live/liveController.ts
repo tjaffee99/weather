@@ -5,6 +5,7 @@
  */
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import { findLatestCycle, type Cycle, type LiveVar } from './gfs';
+import { HRRR_DOMAINS, type ConicGrid, type HrrrDomain } from './hrrr';
 import type { LiveRequest, LiveResponse } from './live.worker';
 import type { FieldLayer, GridSpec } from '../map/fieldLayer';
 import type { WindParticles } from '../map/windParticles';
@@ -15,6 +16,8 @@ import { fmt, type Quantity } from '../units';
 
 const HOUR = 3600_000;
 const LAPSE = 0.0065; // K per m
+/** GFS snow depth is shaped by terrain: e times deeper per this many metres above the model cell's mean elevation */
+const SNOW_SCALE_HEIGHT = 700;
 
 export interface LayerDef {
   id: LiveVar;
@@ -26,16 +29,18 @@ export interface LayerDef {
   lapse: boolean;
   legend: number[]; // metric tick values
   legendImperial?: number[]; // tick values in imperial display units
+  /** shown as a toggle under that layer's button instead of its own button */
+  variantOf?: LiveVar;
 }
 
 export const LIVE_LAYERS: LayerDef[] = [
   { id: 'temp', label: 'Temperature', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90] },
-  { id: 'feels', label: 'Feels like', icon: '🧍', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90] },
+  { id: 'feels', label: 'Feels like', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90], variantOf: 'temp' },
   { id: 'precip', label: 'Precipitation', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25], legendImperial: [0.01, 0.05, 0.2, 1] },
   { id: 'cloud', label: 'Clouds', icon: '☁', palette: CLOUD, q: 'percent', lapse: false, legend: [0, 50, 100] },
+  { id: 'snow', label: 'Snow depth', icon: '❄', palette: SNOW_DEPTH, q: 'snow', lapse: false, legend: [1, 10, 50, 200], legendImperial: [1, 4, 20, 80] },
   { id: 'wind', label: 'Wind', icon: '🌬', palette: WIND, q: 'speed', lapse: false, legend: [0, 20, 50, 100], legendImperial: [0, 10, 30, 60] },
   { id: 'humidity', label: 'Humidity', icon: '💧', palette: HUMIDITY, q: 'percent', lapse: false, legend: [0, 50, 100] },
-  { id: 'snow', label: 'Snow depth', icon: '❄', palette: SNOW_DEPTH, q: 'snow', lapse: false, legend: [1, 10, 50, 200], legendImperial: [1, 4, 20, 80] },
 ];
 
 export const GFS_GRID: GridSpec = { nx: 1440, ny: 721, lon0: 0, lat0: 90, dx: 0.25, dy: 0.25 };
@@ -59,12 +64,12 @@ class LivePool {
       this.workers.push(w);
     }
   }
-  request(cycle: Cycle, fh: number, v: LiveVar): Promise<LiveResponse> {
+  request(cycle: Cycle, fh: number, v: LiveVar, hrrr?: LiveRequest['hrrr']): Promise<LiveResponse> {
     const id = ++this.seq;
     const w = this.workers[this.next++ % this.workers.length];
     return new Promise((resolve, reject) => {
       this.pending.set(id, (r) => (r.error ? reject(new Error(r.error)) : resolve(r)));
-      w.postMessage({ id, cycle, fh, v } satisfies LiveRequest);
+      w.postMessage({ id, cycle, fh, v, hrrr } satisfies LiveRequest);
     });
   }
 }
@@ -82,6 +87,9 @@ export class LiveController {
   private shown = { a: '', b: '', alt: '' };
   private current: { a?: Float32Array; b?: Float32Array; mix: number } = { mix: 0 };
   private loadToken = 0;
+  private hrrrCache = new Map<string, Promise<{ grid: ConicGrid; values: Float32Array } | null>>();
+  /** HRRR field currently wanted per domain ('' = none) */
+  private regKey = ['', ''];
   private cityTimer = 0;
   active = false;
   onStatus: (msg: string, busy: boolean) => void = () => {};
@@ -146,13 +154,20 @@ export class LiveController {
   deactivate() {
     this.active = false;
     this.particles?.setEnabled(false);
+    this.setGlaciers(false);
+  }
+
+  private setGlaciers(on: boolean) {
+    if (this.map.getLayer('glaciers')) this.map.setLayoutProperty('glaciers', 'visibility', on ? 'visible' : 'none');
   }
 
   applyPalette() {
     this.particles?.setEnabled(this.layer.id === 'wind');
+    this.setGlaciers(this.layer.id === 'snow');
     this.field.mode = 0;
     this.field.setPalette(this.layer.palette, this.layer.alt);
     this.field.lapse = this.layer.lapse ? LAPSE : 0;
+    this.field.snowH = this.layer.id === 'snow' ? SNOW_SCALE_HEIGHT : 0;
     this.field.useAlt = this.layer.alt ? 1 : 0;
     this.field.opacity = this.layer.id === 'cloud' ? 1 : this.layer.id === 'wind' ? 0.75 : 0.88;
   }
@@ -193,6 +208,7 @@ export class LiveController {
         if (this.particles && a.u && a.v && b.u && b.v) this.particles.setWind(GRID, { u: a.u, v: a.v }, { u: b.u, v: b.v });
         if (alt) this.field.setField('alt', GRID, alt.values);
         this.shown = { a: ka, b: kb, alt: '' };
+        this.updateRegional();
         this.current.a = a.values;
         this.current.b = b.values;
         this.field.mix = mix;
@@ -211,9 +227,42 @@ export class LiveController {
     this.current.mix = mix;
     this.field.mix = mix;
     if (this.particles) this.particles.mix = mix;
+    this.updateRegional();
     this.field.repaint();
     this.scheduleCityUpdate();
     this.onFrame();
+  }
+
+  /**
+   * Snow depth: NOAA HRRR (3 km) over the contiguous US and Alaska, for the
+   * hour nearest the shown time. Other layers have no regional field.
+   */
+  private updateRegional() {
+    const snow = this.layer.id === 'snow';
+    const t = Math.round(this.time / HOUR) * HOUR;
+    HRRR_DOMAINS.forEach(async (d, i) => {
+      const slot = i as 0 | 1;
+      const key = snow ? `${d}:${t}` : '';
+      if (this.regKey[i] === key) return;
+      this.regKey[i] = key;
+      if (!snow) return this.field.setRegional(slot, null);
+      const r = await this.hrrr(d, t).catch(() => null);
+      if (this.regKey[i] !== key || !this.active) return;
+      // keep the previous hour on screen if this one is missing, unless out of range
+      if (r || t > Date.now() + 47 * HOUR) this.field.setRegional(slot, r);
+    });
+  }
+
+  private hrrr(d: HrrrDomain, t: number) {
+    const k = `${d}:${t}`;
+    let p = this.hrrrCache.get(k);
+    if (!p) {
+      p = this.pool.request(this.cycle!, 0, 'snow', { domain: d, t }).then((r) => (r.values && r.grid ? { grid: r.grid, values: r.values } : null));
+      p.catch(() => this.hrrrCache.delete(k));
+      this.hrrrCache.set(k, p);
+      while (this.hrrrCache.size > 8) this.hrrrCache.delete(this.hrrrCache.keys().next().value!);
+    }
+    return p;
   }
 
   /** Sample the displayed field at a point (with the same downscaling as the shader). */

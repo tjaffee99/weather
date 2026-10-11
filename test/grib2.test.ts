@@ -1,6 +1,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { decodeGrib2 } from '../src/live/grib2';
+import { conicGrid, conicIndex } from '../src/live/hrrr';
 
 const ref = JSON.parse(readFileSync(new URL('./fixtures/grib_ref.json', import.meta.url), 'utf8'));
 
@@ -34,5 +35,28 @@ describe('GRIB2 decoder (checked against ecCodes)', () => {
   const tmp = process.env.GRIB_TMP_FIXTURE;
   it.skipIf(!tmp || !existsSync(tmp))('decodes a full 2 m temperature field', () => {
     check('tmp', new URL(`file://${tmp}`));
+  });
+});
+
+describe('HRRR Lambert conformal grid (checked against ecCodes)', () => {
+  const r = ref.hrrr_snod;
+  const [f] = decodeGrib2(new Uint8Array(readFileSync(new URL('./fixtures/hrrr_snod.grb', import.meta.url))));
+
+  it('decodes values in file order', () => {
+    expect([f.nx, f.ny]).toEqual([r.nx, r.ny]);
+    expect(f.projected?.type).toBe('lambert');
+    let sum = 0;
+    for (const v of f.values) sum += v;
+    expect(sum / f.values.length).toBeCloseTo(r.mean, 5);
+    for (const p of r.points) expect(f.values[p.i]).toBeCloseTo(p.value, 3);
+  });
+
+  it('maps latitude/longitude to grid indices', () => {
+    const g = conicGrid(f);
+    for (const p of r.points) {
+      const [i, j] = conicIndex(g, p.lon, p.lat);
+      expect(i).toBeCloseTo(p.i % r.nx, 3);
+      expect(j).toBeCloseTo(Math.floor(p.i / r.nx), 3);
+    }
   });
 });

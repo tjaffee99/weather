@@ -6,7 +6,7 @@ export interface LegendTick {
   label: string;
 }
 
-export function renderLegend(el: HTMLElement, title: string, unit: string, p: Palette, ticks: LegendTick[]) {
+export function renderLegend(el: HTMLElement, title: string, unit: string, p: Palette, ticks: LegendTick[], note?: Node) {
   clear(el);
   const [d0, d1] = domain(p);
   const pos = (v: number) => Math.min(100, Math.max(0, ((tf(p, v) - d0) / (d1 - d0)) * 100));
@@ -19,5 +19,5 @@ export function renderLegend(el: HTMLElement, title: string, unit: string, p: Pa
   }
   const bar = h('div', { class: 'legend-bar' });
   bar.style.background = cssGradient(p);
-  el.append(h('div', { class: 'legend-title' }, h('b', {}, title), h('span', {}, unit)), bar, tickEl);
+  el.append(h('div', { class: 'legend-title' }, h('b', {}, title), h('span', {}, ...(note ? [note] : []), unit)), bar, tickEl);
 }

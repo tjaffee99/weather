@@ -63,13 +63,15 @@ export const SNOWFALL: Palette = {
   ],
 };
 
+/** Clear sky is blue, overcast is white, so clouds read on the light basemap. */
 export const CLOUD: Palette = {
   stops: [
-    [0, '#ffffff', 0],
-    [20, '#ffffff', 0.03],
-    [50, '#eef2f8', 0.26],
-    [80, '#e2e8f1', 0.5],
-    [100, '#d8dfea', 0.66],
+    [0, '#4f86c6', 0.86],
+    [15, '#5d90cb', 0.86],
+    [40, '#8fb0d8', 0.88],
+    [65, '#c9d7e8', 0.92],
+    [85, '#eef2f8', 0.95],
+    [100, '#ffffff', 0.97],
   ],
 };
 
@@ -94,15 +96,18 @@ export const SNOW_DEPTH: Palette = {
   transform: 'log',
   stops: [
     [0.5, '#dfe9ff', 0],
-    [1, '#dfe9ff', 0.45],
-    [5, '#c5d6ff', 0.7],
-    [15, '#9fb4ff', 0.85],
-    [40, '#8a8cf5', 0.95],
-    [100, '#a66be0', 1],
-    [250, '#e2a6f0', 1],
-    [600, '#ffffff', 1],
+    [1, '#d3e1ff', 0.5],
+    [5, '#b4c8ff', 0.75],
+    [15, '#8ea6fb', 0.88],
+    [40, '#7a7ff0', 0.95],
+    [100, '#8c5ad8', 1],
+    [250, '#6f3cb8', 1],
+    [600, '#4b2390', 1],
   ],
 };
+
+/** Glaciers and ice sheets in the snow-depth view (deeper than any seasonal snow). */
+export const GLACIER = '#5a2ca3';
 
 export const HUMIDITY: Palette = {
   stops: [

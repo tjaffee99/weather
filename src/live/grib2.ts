@@ -1,9 +1,10 @@
 /**
  * Minimal GRIB2 decoder for NOAA GFS fields.
  *
- * Supports regular lat/lon grids (grid template 3.0), simple packing (5.0) and
- * complex packing with spatial differencing (5.2 / 5.3), with or without a
- * bitmap (section 6). That covers every GFS pgrb2 field we use.
+ * Supports regular lat/lon grids (grid template 3.0), polar stereographic and
+ * Lambert conformal grids (3.20 / 3.30, as used by HRRR), simple packing (5.0)
+ * and complex packing with spatial differencing (5.2 / 5.3), with or without a
+ * bitmap (section 6). That covers every GFS and HRRR field we use.
  */
 
 export interface GribField {
@@ -16,6 +17,25 @@ export interface GribField {
   dy: number;
   /** values in row-major order, rows from lat1 stepping by -dy (north to south for GFS) */
   values: Float32Array;
+  /**
+   * Set for projected grids (3.20 / 3.30). Values then stay in file order:
+   * rows start at the first grid point (lat1, lon1) and step by dyM metres
+   * along the projection's y axis (northward when scan has bit 0x40).
+   */
+  projected?: ProjectedGrid;
+}
+
+export interface ProjectedGrid {
+  type: 'polar' | 'lambert';
+  /** latitude where the grid is true to scale (LaD), standard parallels, orientation (LoV) */
+  lad: number;
+  latin1: number;
+  latin2: number;
+  lov: number;
+  dxM: number;
+  dyM: number;
+  radius: number;
+  scan: number;
 }
 
 class BitReader {
@@ -91,6 +111,7 @@ function decodeMessage(m: Uint8Array): GribField {
   if (m[7] !== 2) throw new Error('not GRIB edition 2');
   let off = 16;
   let nx = 0, ny = 0, lat1 = 0, lon1 = 0, dx = 0, dy = 0, scan = 0;
+  let projected: ProjectedGrid | undefined;
   let nPoints = 0;
   let drsTemplate = -1;
   let drs: Uint8Array | null = null;
@@ -104,14 +125,34 @@ function decodeMessage(m: Uint8Array): GribField {
     const s = m.subarray(off, off + len);
     if (sec === 3) {
       const tpl = u16(s, 12);
-      if (tpl !== 0) throw new Error(`unsupported grid template 3.${tpl}`);
       nx = u32(s, 30);
       ny = u32(s, 34);
-      lat1 = s32(s, 46) / 1e6;
-      lon1 = u32(s, 50) / 1e6;
-      dx = u32(s, 63) / 1e6;
-      dy = u32(s, 67) / 1e6;
-      scan = s[71];
+      if (tpl === 0) {
+        lat1 = s32(s, 46) / 1e6;
+        lon1 = u32(s, 50) / 1e6;
+        dx = u32(s, 63) / 1e6;
+        dy = u32(s, 67) / 1e6;
+        scan = s[71];
+      } else if (tpl === 20 || tpl === 30) {
+        lat1 = s32(s, 38) / 1e6;
+        lon1 = u32(s, 42) / 1e6;
+        if (s[63] & 0x80) throw new Error('south polar projections not supported');
+        scan = s[64];
+        const shape = s[14];
+        projected = {
+          type: tpl === 20 ? 'polar' : 'lambert',
+          lad: s32(s, 47) / 1e6,
+          lov: u32(s, 51) / 1e6,
+          dxM: u32(s, 55) / 1e3,
+          dyM: u32(s, 59) / 1e3,
+          latin1: tpl === 30 ? s32(s, 65) / 1e6 : 0,
+          latin2: tpl === 30 ? s32(s, 69) / 1e6 : 0,
+          radius: shape === 1 ? u32(s, 16) / Math.pow(10, s[15]) : shape === 0 ? 6367470 : 6371229,
+          scan,
+        };
+      } else {
+        throw new Error(`unsupported grid template 3.${tpl}`);
+      }
     } else if (sec === 5) {
       nPoints = u32(s, 5);
       drsTemplate = u16(s, 9);
@@ -156,6 +197,7 @@ function decodeMessage(m: Uint8Array): GribField {
   } else {
     values = packed;
   }
+  if (projected) return { nx, ny, lat1, lon1, dx, dy, values, projected };
   // normalise to north->south rows
   if (scan & 0x40) {
     const flipped = new Float32Array(total);

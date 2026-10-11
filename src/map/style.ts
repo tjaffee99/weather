@@ -8,6 +8,7 @@
  * flattens the sea floor so oceans stay smooth.
  */
 import type { StyleSpecification } from 'maplibre-gl';
+import { GLACIER } from './palettes';
 
 export const WEATHER_BEFORE = 'hillshade';
 export const LAND = '#eeefe9';
@@ -45,6 +46,16 @@ export function baseStyle(coastlineUrl: string): StyleSpecification {
           'hillshade-accent-color': 'rgba(40,48,60,0.12)',
           'hillshade-illumination-direction': 315,
         },
+      },
+      {
+        // permanent ice, shown with the snow-depth layer (Natural Earth at low zoom, OSM glaciers above)
+        id: 'glaciers',
+        type: 'fill',
+        source: 'omt',
+        'source-layer': 'landcover',
+        filter: ['==', ['get', 'class'], 'ice'],
+        layout: { visibility: 'none' },
+        paint: { 'fill-color': GLACIER, 'fill-opacity': ['interpolate', ['linear'], ['zoom'], 3, 0.75, 10, 0.6], 'fill-antialias': true },
       },
       {
         id: 'water',

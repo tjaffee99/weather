@@ -4,7 +4,7 @@ import { h, clear } from '../ui/dom';
 import { renderLegend } from '../ui/legend';
 import { cssGradient } from '../map/palettes';
 import { coordLabel, timeLabel } from '../ui/format';
-import { colorAt, TEMPERATURE } from '../map/palettes';
+import { colorAt, GLACIER, TEMPERATURE } from '../map/palettes';
 import { condition, openMeteo, type Hour, type PointForecast } from './pointForecast';
 import { pointElevation } from '../map/localDem';
 import { demAt, type Dem } from '../data';
@@ -19,6 +19,8 @@ export class LiveUI {
   private range?: HTMLInputElement;
   private label?: HTMLElement;
   private cardToken = 0;
+  /** last chosen variant per layer (e.g. temperature → feels like) */
+  private variant = new Map<LiveVar, LiveVar>();
 
   constructor(
     private c: LiveController,
@@ -54,7 +56,11 @@ export class LiveUI {
     clear(p);
     p.append(h('h2', {}, 'Live weather'));
     const list = h('div', { class: 'layer-list' });
+    const cur = this.c.layer;
     for (const l of LIVE_LAYERS) {
+      if (l.variantOf) continue;
+      const variants = LIVE_LAYERS.filter((x) => x.variantOf === l.id);
+      const active = cur.id === l.id || cur.variantOf === l.id;
       const sw = h('span', { class: 'sw' });
       sw.style.background = cssGradient(l.palette);
       list.append(
@@ -62,9 +68,10 @@ export class LiveUI {
           'button',
           {
             class: 'layer-btn',
-            'aria-pressed': String(l.id === this.c.layer.id),
+            'aria-pressed': String(active),
             onclick: () => {
-              this.c.setLayer(l.id as LiveVar);
+              if (active) return;
+              this.c.setLayer(variants.length ? this.variant.get(l.id) ?? l.id : l.id);
               this.renderPanel();
             },
           },
@@ -73,6 +80,22 @@ export class LiveUI {
           sw,
         ),
       );
+      if (active && variants.length) {
+        const pick = (id: LiveVar) => {
+          this.variant.set(l.id, id);
+          if (id !== this.c.layer.id) this.c.setLayer(id);
+          this.renderPanel();
+        };
+        list.append(
+          h(
+            'div',
+            { class: 'seg layer-variant', role: 'group', 'aria-label': `${l.label} type` },
+            ...[l, ...variants].map((x) =>
+              h('button', { 'aria-selected': String(cur.id === x.id), onclick: () => pick(x.id) }, x.variantOf ? x.label : 'Actual'),
+            ),
+          ),
+        );
+      }
     }
     p.append(list);
     const cyc = this.c.cycle;
@@ -82,6 +105,7 @@ export class LiveUI {
         { class: 'run-info' },
         'NOAA GFS 0.25° global model',
         h('br'),
+        ...(this.c.layer.id === 'snow' ? ['US & Alaska snow: NOAA HRRR 3 km', h('br')] : []),
         cyc ? `Run ${cyc.date.slice(0, 4)}-${cyc.date.slice(4, 6)}-${cyc.date.slice(6)} ${String(cyc.hour).padStart(2, '0')}Z · downscaled to terrain` : 'Loading…',
         h('br'),
         'Tap anywhere for a point forecast.',
@@ -91,6 +115,12 @@ export class LiveUI {
 
   renderLegend() {
     const l = this.c.layer;
+    let note: Node | undefined;
+    if (l.id === 'snow') {
+      const sw = h('i');
+      sw.style.background = GLACIER;
+      note = h('span', { class: 'legend-key' }, sw, 'Glacier');
+    }
     renderLegend(
       this.els.legend,
       l.label,
@@ -99,6 +129,7 @@ export class LiveUI {
       units.imperial && l.legendImperial
         ? l.legendImperial.map((d) => ({ value: fromDisplay(l.q, d), label: l.q === 'temp' ? `${d}°` : String(d) }))
         : l.legend.map((v) => ({ value: v, label: fmt(l.q, v, false) })),
+      note,
     );
   }
 
