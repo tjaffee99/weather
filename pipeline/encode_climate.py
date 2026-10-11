@@ -38,6 +38,8 @@ VARS = {
     "precip": ("precip", {"type": "bins", "edges": PRECIP_EDGES}),
     "wind": ("wind", {"type": "bins", "edges": WIND_EDGES}),
     "snow": ("snow", {"type": "bins", "edges": SNOW_EDGES}),
+    # hours of sunshine per day (WMO: direct normal irradiance >= 120 W/m2), half-hour steps
+    "sun": ("sun", {"type": "linear", "scale": 0.5, "offset": 0.0}),
 }
 BLOCK = 3
 # ERA5 rains lightly far too often ("drizzle bias"): days with >= 1 mm are
@@ -111,7 +113,10 @@ def main():
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     st = np.load(os.path.join(a.work, f"static_{a.res}.npz"))
-    smp = np.load(os.path.join(a.work, "samples_pass0.npz"))
+    smp = dict(np.load(os.path.join(a.work, "samples_pass0.npz")))
+    sun_path = os.path.join(a.work, "samples_sun.npz")
+    if os.path.exists(sun_path):  # produced by era5_climate.py --only-sun
+        smp["sun"] = np.load(sun_path)["sun"]
     land, elev, lat, lon = st["land"], st["elev"], st["lat"], st["lon"]
     R, C = land.shape
     mask = land > a.min_land
@@ -137,6 +142,9 @@ def main():
     }
     total = 0
     for vid, (key, enc) in VARS.items():
+        if key not in smp:
+            print(f"skipping {vid}: no samples")
+            continue
         x = smp[key]
         if vid == "precip":
             x = np.maximum(x - DRIZZLE_OFFSET_MM, 0)

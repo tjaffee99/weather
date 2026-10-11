@@ -13,7 +13,7 @@ const HOUR = 3600_000;
 /** Sea temperature value used where there is no sea nearby (below any threshold). */
 export const NO_SEA = -60;
 
-export type LiveVar = 'temp' | 'feels' | 'precip' | 'cloud' | 'wind' | 'snow' | 'humidity' | 'orog' | 'csnow' | 'dew' | 'sst';
+export type LiveVar = 'temp' | 'feels' | 'precip' | 'cloud' | 'wind' | 'snow' | 'humidity' | 'orog' | 'csnow' | 'dew' | 'sst' | 'sunsd' | 'sun';
 
 /** GRIB parameter + level as written in the .idx inventory */
 const RECORDS: Record<LiveVar, string[]> = {
@@ -29,6 +29,9 @@ const RECORDS: Record<LiveVar, string[]> = {
   dew: ['DPT:2 m above ground'],
   // skin temperature over water = sea surface temperature; land & ice masks to pick water
   sst: ['TMP:surface', 'LAND:surface', 'ICEC:surface'],
+  // sunshine duration (s), accumulated since the last 6-hourly reset
+  sunsd: ['SUNSD:surface'],
+  sun: [], // derived: see sunshineHours in live.worker.ts
 };
 
 export interface Cycle {

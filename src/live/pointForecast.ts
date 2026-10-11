@@ -22,7 +22,7 @@ export interface PointForecast {
   source: 'Open-Meteo' | 'NOAA GFS';
   timezone?: string;
   hours: Hour[];
-  daily: { t: number; max: number; min: number }[];
+  daily: { t: number; max: number; min: number; sun?: number; uv?: number }[];
 }
 
 export async function openMeteo(lat: number, lon: number, signal?: AbortSignal): Promise<PointForecast> {
@@ -32,7 +32,7 @@ export async function openMeteo(lat: number, lon: number, signal?: AbortSignal):
   ];
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}` +
-    `&hourly=${hourly.join(',')}&daily=temperature_2m_max,temperature_2m_min` +
+    `&hourly=${hourly.join(',')}&daily=temperature_2m_max,temperature_2m_min,sunshine_duration,uv_index_max` +
     `&past_days=1&forecast_days=5&timezone=auto&timeformat=unixtime`;
   const res = await fetch(url, { signal });
   const j = await res.json();
@@ -52,7 +52,14 @@ export async function openMeteo(lat: number, lon: number, signal?: AbortSignal):
     gust: h.wind_gusts_10m?.[i],
   })).filter((x) => Number.isFinite(x.temp));
   const d = j.daily;
-  const daily = (d?.time as number[] | undefined)?.map((t, i) => ({ t: t * 1000, max: d.temperature_2m_max[i], min: d.temperature_2m_min[i] })) ?? [];
+  const daily =
+    (d?.time as number[] | undefined)?.map((t, i) => ({
+      t: t * 1000,
+      max: d.temperature_2m_max[i],
+      min: d.temperature_2m_min[i],
+      sun: d.sunshine_duration?.[i] != null ? d.sunshine_duration[i] / 3600 : undefined,
+      uv: d.uv_index_max?.[i] ?? undefined,
+    })) ?? [];
   return { source: 'Open-Meteo', timezone: j.timezone, hours, daily };
 }
 

@@ -113,6 +113,8 @@ def main():
     ap.add_argument("--pass", dest="pas", type=int, default=0)
     ap.add_argument("--threads", type=int, default=48)
     ap.add_argument("--limit-blocks", type=int, default=0, help="debug: only process N blocks")
+    ap.add_argument("--only-sun", action="store_true",
+                    help="compute only daily sunshine hours for the same sample days (samples_sun.npz)")
     args = ap.parse_args()
 
     y0, y1 = (int(x) for x in args.years.split("-"))
@@ -151,6 +153,9 @@ def main():
         s = cz.box(np.where(ok, a, 0))
         n = cz.box(ok.astype(np.float32))
         return np.where(n > 0.25, s / np.maximum(n, 1e-9), np.nan).astype(np.float32)
+
+    if args.only_sun:
+        return sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs)
 
     # ---- blocks ----------------------------------------------------------
     nblocks = (365 + L - 1) // L
@@ -262,6 +267,103 @@ def main():
         years_used[[(doy0 + k) % 365 for k in range(nd)]] = int(d["year"])
     np.savez(out_path, years=years_used, **full)
     print("wrote", out_path)
+
+
+def block_start(b, L, years, args):
+    doy0 = b * L + args.pas % L
+    ndays = min(L, 365 - doy0) if args.pas == 0 else L
+    year = years[(b * args.stride + args.pas * 13) % len(years)]
+    start = dt.datetime(year, 1, 1) + dt.timedelta(days=doy0)
+    if year % 4 == 0 and doy0 >= 59:
+        start += dt.timedelta(days=1)
+    return doy0, ndays, year, start
+
+
+def cos_zenith(t: dt.datetime, lat_c, lon_c):
+    """Cosine of the solar zenith angle on the (rows, cols) grid at UTC time t."""
+    doy = t.timetuple().tm_yday
+    g = 2 * np.pi / 365 * (doy - 1 + (t.hour - 12) / 24)
+    decl = (0.006918 - 0.399912 * np.cos(g) + 0.070257 * np.sin(g) - 0.006758 * np.cos(2 * g)
+            + 0.000907 * np.sin(2 * g) - 0.002697 * np.cos(3 * g) + 0.00148 * np.sin(3 * g))
+    eqt = 229.18 * (0.000075 + 0.001868 * np.cos(g) - 0.032077 * np.sin(g) - 0.014615 * np.cos(2 * g)
+                    - 0.040849 * np.sin(2 * g))  # minutes
+    minutes = t.hour * 60 + t.minute + t.second / 60
+    ha = np.radians((minutes + eqt + 4 * lon_c[None, :]) / 4 - 180)
+    phi = np.radians(lat_c)[:, None]
+    return np.sin(phi) * np.sin(decl) + np.cos(phi) * np.cos(decl) * np.cos(ha)
+
+
+SUN_RATIOS = (0.6, 0.7, 0.8, 0.9, 1.0)
+
+
+def sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs):
+    """Daily sunshine hours per local day.
+
+    WMO sunshine = direct normal irradiance >= 120 W/m2. On 1-degree cell means
+    a threshold would count a half-cloudy hour as fully sunny, so each hour
+    counts the fraction of clear-sky direct radiation that got through,
+    min(1, (direct / clear-sky direct) / r), in hours where the clear-sky beam
+    exceeds 120 W/m2. Several r are written (sun_<r>); encode_climate.py uses
+    the one calibrated against station sunshine records.
+    """
+    R, C = cz.rows, cz.cols
+    nblocks = (365 + L - 1) // L
+    part_dir = os.path.join(args.work, "parts_sun")
+    os.makedirs(part_dir, exist_ok=True)
+    hours_all = list(range(-12, 24 * L + 13))
+    loc_h = np.arange(24)
+    pool = ThreadPoolExecutor(args.threads)
+    t_start = time.time()
+    blocks = range(nblocks) if not args.limit_blocks else range(args.limit_blocks)
+    for b in blocks:
+        part = os.path.join(part_dir, f"b{b:03d}.npz")
+        if os.path.exists(part):
+            continue
+        doy0, ndays, year, start = block_start(b, L, years, args)
+        h0 = hidx(start)
+
+        def work(key):
+            var, h = key
+            a = fetch(var, h0 + h)
+            return key, coarse(np.nan_to_num(np.maximum(a, 0), nan=0.0))
+
+        keys = [(v, h) for v in ("total_sky_direct_solar_radiation_at_surface",
+                                 "clear_sky_direct_solar_radiation_at_surface") for h in hours_all]
+        got = dict(pool.map(work, keys))
+        ratio = np.zeros((len(hours_all), R, C), np.float32)
+        for n, h in enumerate(hours_all):
+            t_end = start + dt.timedelta(hours=h)
+            mu = np.mean([np.maximum(cos_zenith(t_end - dt.timedelta(minutes=m), lat_c, lon_c), 0)
+                          for m in (7.5, 22.5, 37.5, 52.5)], axis=0)
+            fdir = got[("total_sky_direct_solar_radiation_at_surface", h)]
+            cdir = got[("clear_sky_direct_solar_radiation_at_surface", h)]
+            possible = (mu > 0.03) & (cdir / 3600.0 / np.maximum(mu, 0.03) >= 120.0)
+            ratio[n] = np.where(possible, np.clip(fdir / np.maximum(cdir, 1.0), 0, 1), -1)
+        out = {}
+        for r in SUN_RATIOS:
+            frac = np.where(ratio < 0, 0, np.clip(ratio / r, 0, 1))
+            sun = np.zeros((ndays, R, C), np.float32)
+            for k in range(ndays):
+                idx = 24 * k + loc_h[:, None] - offs[None, :] + 12
+                idx = np.broadcast_to(idx[:, None, :], (24, R, C))
+                sun[k] = np.take_along_axis(frac, idx + 1, 0).sum(0)
+            out[f"sun_{r}"] = sun
+        np.savez(part, doy0=doy0, year=year, **out)
+        print(f"sun block {b+1}/{nblocks} {start:%Y-%m-%d} elapsed={time.time()-t_start:.0f}s", flush=True)
+
+    if args.limit_blocks:
+        return
+    res = {}
+    for r in SUN_RATIOS:
+        o = np.full((365, R, C), np.nan, np.float32)
+        for b in range(nblocks):
+            d = np.load(os.path.join(part_dir, f"b{b:03d}.npz"))
+            arr = d[f"sun_{r}"]
+            for k in range(arr.shape[0]):
+                o[(int(d["doy0"]) + k) % 365] = arr[k]
+        res[f"sun_{r}"] = o
+    np.savez(os.path.join(args.work, "samples_sun.npz"), **res)
+    print("wrote samples_sun.npz")
 
 
 if __name__ == "__main__":

@@ -49,6 +49,11 @@ export const CRITERIA: CritDef[] = [
     def: [-Infinity, 40], // mostly sunny
   },
   {
+    v: 'sun', group: 'Sky & air', label: 'Sunshine', hint: 'Hours of direct sun in the day', q: 'hours', kind: 'continuous',
+    metric: { min: 0, max: 16, step: 0.5 }, imperial: { min: 0, max: 16, step: 0.5 }, file: 'sun',
+    def: [6, Infinity], // a mostly sunny day, even in winter at mid-latitudes
+  },
+  {
     v: 'precip', group: 'Rain & wind', label: 'Precipitation', hint: 'Rain or melted snow per day', q: 'precip', kind: 'bins',
     edges: [0.1, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50, 75, 100, 150], file: 'precip',
     def: [-Infinity, 1], // a dry day (the standard 1 mm wet-day threshold)
@@ -92,7 +97,7 @@ export const PRESETS: Preset[] = [
   { id: 'ski', label: 'Skiing', icon: '⛷', state: { tmax: [-12, 4], snow: [30, I], wind: [-I, 40] } },
   { id: 'hike', label: 'Hiking', icon: '🥾', state: { feels: [10, 24], precip: [-I, 1], wind: [-I, 30] } },
   { id: 'dry', label: 'Not muggy', icon: '🌵', state: { dew: [-I, 13], feels: [16, 30] } },
-  { id: 'sunny', label: 'Sunny', icon: '☀️', state: { cloud: [-I, 20], precip: [-I, 1] } },
+  { id: 'sunny', label: 'Sunny', icon: '☀️', state: { sun: [9, I], precip: [-I, 1] } },
   { id: 'rain', label: 'Rainy', icon: '☔', state: { precip: [1, I] } },
   { id: 'snowy', label: 'Snowy', icon: '❄️', state: { snow: [5, I] } },
 ];

@@ -265,6 +265,8 @@ function renderForecast(fc: PointForecast, at: number): Node[] {
       stat('Humidity', cur.humidity !== undefined ? fmt('percent', cur.humidity) : '—'),
       stat('Cloud cover', cur.cloud !== undefined ? fmt('percent', cur.cloud) : '—'),
       stat('Precipitation', precipTxt),
+      ...(day?.sun !== undefined ? [stat('Sunshine today', `${day.sun.toFixed(1)} h`)] : []),
+      ...(day?.uv !== undefined ? [stat('UV index', `${Math.round(day.uv)}${day.uv >= 8 ? ' · very high' : day.uv >= 6 ? ' · high' : day.uv >= 3 ? ' · moderate' : ' · low'}`)] : []),
     ),
     h(
       'div',

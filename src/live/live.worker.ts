@@ -22,6 +22,11 @@ export interface LiveResponse {
 self.onmessage = async (e: MessageEvent<LiveRequest>) => {
   const { id, cycle, fh, v } = e.data;
   try {
+    if (v === 'sun') {
+      const out = await sunshineHours(cycle, fh);
+      (self as unknown as Worker).postMessage({ id, values: out, nx: 1440, ny: 721 } satisfies LiveResponse, [out.buffer]);
+      return;
+    }
     const fields = await fetchField(cycle, fh, v);
     const f = fields[0];
     const n = f.values.length;
@@ -95,4 +100,18 @@ function seaSurface(skin: Float32Array, land: Float32Array, ice: Float32Array, n
   }
   for (let i = 0; i < n; i++) if (Number.isNaN(cur[i])) cur[i] = NO_SEA;
   return cur;
+}
+
+/**
+ * Hours of sunshine over the 24 h around forecast hour fh. GFS SUNSD resets
+ * every 6 hours, so the value at each 6-hourly step is that bucket's total.
+ */
+async function sunshineHours(cycle: Cycle, fh: number): Promise<Float32Array> {
+  const start = Math.min(96, Math.max(0, Math.round((fh - 12) / 6) * 6));
+  const ends = [start + 6, start + 12, start + 18, start + 24];
+  const parts = await Promise.all(ends.map((e) => fetchField(cycle, e, 'sunsd')));
+  const n = parts[0][0].values.length;
+  const out = new Float32Array(n);
+  for (const [f] of parts) for (let i = 0; i < n; i++) out[i] += f.values[i] / 3600;
+  return out;
 }

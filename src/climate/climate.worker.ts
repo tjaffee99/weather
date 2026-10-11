@@ -333,6 +333,7 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
     st.cloud = mean('cloud');
     st.wind = mean('wind');
     st.sst = mean('sst');
+    st.sun = mean('sun');
     const pm = mean('precip');
     st.precip = pm === undefined ? undefined : pm * n;
     st.rainDays = count('precip', (x) => x >= 1);

@@ -42,6 +42,7 @@ const NOW: Record<CritVar, { v: LiveVar | null; kind: number; soft: number; labe
   wind: { v: 'wind', kind: 0, soft: 1.5 },
   snow: { v: 'snow', kind: 0, soft: 1 },
   sst: { v: 'sst', kind: 0, soft: 0.5 },
+  sun: { v: 'sun', kind: 0, soft: 0.3, label: 'Sunshine today' },
   daylight: { v: null, kind: 3, soft: 0.2 },
 };
 
@@ -801,14 +802,14 @@ export class ClimateUI {
         h('h3', {}, 'Monthly climate'),
         normalsTable(res),
       );
-      const missing = (['dew', 'wind', 'snow', 'sst'] as ClimVar[]).filter((v) => !res.loaded.includes(v));
+      const missing = (['cloud', 'dew', 'wind', 'snow', 'sst'] as ClimVar[]).filter((v) => !res.loaded.includes(v));
       if (missing.length && this.meta) {
         const mb = missing.reduce((s, v) => s + this.meta!.vars[v].bytes, 0) / 1e6;
         card.append(
           h(
             'button',
-            { class: 'chip', style: 'margin-top:10px', onclick: () => this.detail(lon, lat, dem, crit, [...base, ...missing, 'feels', 'tmax', 'tmin', 'precip', 'cloud']).then(render) },
-            `+ Humidity, wind, snow & sea (${mb.toFixed(1)} MB)`,
+            { class: 'chip', style: 'margin-top:10px', onclick: () => this.detail(lon, lat, dem, crit, [...base, ...missing, 'feels', 'tmax', 'tmin', 'precip', 'sun', 'cloud']).then(render) },
+            `+ Clouds, humidity, wind, snow & sea (${mb.toFixed(1)} MB)`,
           ),
         );
       }
@@ -823,7 +824,7 @@ export class ClimateUI {
     try {
       // fast pass with what is already loaded, then fill in the normals
       render(await this.detail(lon, lat, dem, crit, base));
-      render(await this.detail(lon, lat, dem, crit, [...base, 'feels', 'tmax', 'tmin', 'precip', 'cloud']));
+      render(await this.detail(lon, lat, dem, crit, [...base, 'feels', 'tmax', 'tmin', 'precip', 'sun']));
     } catch (e) {
       card.querySelector('.desc')?.replaceChildren(`Could not load: ${(e as Error).message}`);
     }
@@ -968,7 +969,8 @@ function normalsTable(r: DetailResult): HTMLTableElement {
     ['High', 'Average daytime high', (m) => (m.tmax === undefined ? undefined : fmt('temp', m.tmax))],
     ['Low', 'Average overnight low', (m) => (m.tmin === undefined ? undefined : fmt('temp', m.tmin))],
     ['Dew pt', 'Average daytime dew point (humidity)', (m) => (m.dew === undefined ? undefined : fmt('temp', m.dew))],
-    ['Sunny', 'Days with daytime cloud cover ≤ 25%', (m) => (m.sunnyDays === undefined ? undefined : String(m.sunnyDays))],
+    ['Sun h', 'Average hours of sunshine per day', (m) => (m.sun === undefined ? undefined : m.sun.toFixed(1))],
+    ['Clear', 'Days with daytime cloud cover ≤ 25%', (m) => (m.sunnyDays === undefined ? undefined : String(m.sunnyDays))],
     ['Rainy', 'Days with ≥ 1 mm of precipitation', (m) => (m.rainDays === undefined ? undefined : String(m.rainDays))],
     [`Precip ${unitLabel('precip')}`, 'Total precipitation in the month', (m) => (m.precip === undefined ? undefined : fmt('precip', m.precip, false))],
     ['Snowy', 'Days with ≥ 1 cm of snow on the ground', (m) => (m.snowDays === undefined ? undefined : String(m.snowDays))],

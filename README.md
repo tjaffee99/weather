@@ -2,7 +2,7 @@
 
 An interactive world weather map with two views:
 
-- **Climate finder** (the home page): add conditions such as feels-like high, daytime high, overnight low, humidity, cloud cover, precipitation, wind, snow on the ground, sea temperature and daylight. Start from a preset (perfect day, beach, skiing…) or use the grouped "Add condition" menu. Each condition starts from a sensible range (e.g. feels-like 18–27 °C, cloud ≤ 40%, a dry day ≤ 1 mm, wind below a fresh breeze, sea ≥ 24 °C). A three-way switch at the top of the panel chooses what the colours show:
+- **Climate finder** (the home page): add conditions such as feels-like high, daytime high, overnight low, humidity, hours of sunshine, cloud cover, precipitation, wind, snow on the ground, sea temperature and daylight. Start from a preset (perfect day, beach, skiing…) or use the grouped "Add condition" menu. Each condition starts from a sensible range (e.g. feels-like 18–27 °C, cloud ≤ 40%, a dry day ≤ 1 mm, wind below a fresh breeze, sea ≥ 24 °C). A three-way switch at the top of the panel chooses what the colours show:
   - **Days per year**: how many days a year each place meets all of your conditions, based on 2001–2025 ERA5 reanalysis. "Highlight at least" answers "where do I get at least N such days a year?" by dimming everything below it.
   - **Chance by date**: the chance that a day around the chosen date matches. Drag the date slider or press play to animate through the year.
   - **Right now**: the same conditions checked against the latest NOAA GFS forecast, at the current hour or any hour in the next 3 days, to show where it is nice right now. Temperatures are the current reading (terrain-adjusted), precipitation is the current rate, and sea temperature comes from the model's sea surface. Sliders update the map instantly on the GPU, and matching cities get a ✓ with their temperature.
@@ -28,12 +28,13 @@ GFS 0.25° GRIB2 files are fetched directly from NOAA's public AWS bucket, which
 - high and low
 - daytime dew point
 - daytime cloud cover
+- hours of sunshine (WMO definition: direct normal irradiance ≥ 120 W/m², from ERA5 direct radiation and the sun angle; `--only-sun` adds it to an existing sample)
 - daily precipitation
 - strongest daytime wind
 - snow depth
 - nearby sea-surface temperature
 
-Coastal cells use land-weighted averages. ERA5 reports light rain far too often (its well-known "drizzle bias"), so 1 mm/day is subtracted before encoding. With that correction, the app's rain days (≥ 1 mm) match station counts within about 10% in the mid-latitudes (London, Paris, Sydney, Miami, Seattle). The tropics still come out too wet.
+Coastal cells use land-weighted averages. ERA5 reports light rain far too often (its well-known "drizzle bias"), so 1 mm/day is subtracted before encoding. With that correction, the app's rain days (≥ 1 mm) match station counts within about 10% in the mid-latitudes (London, Paris, Sydney, Miami, Seattle). The tropics still come out too wet. ERA5 cloud cover also counts thin high cloud that barely dims the sun, so sunshine hours are the better measure of a sunny day.
 
 `pipeline/encode_climate.py` quantizes each variable and compresses it with spatial and temporal predictive coding plus gzip. Each variable is its own file (0.5–2.6 MB), so the browser only downloads the variables the active conditions need. `src/climate/climate.worker.ts` evaluates queries over all ~19,000 cells × 365 days in about 30–170 ms. It returns results at 9 elevation offsets, and the shader picks the right one for each pixel from the DEM.
 
