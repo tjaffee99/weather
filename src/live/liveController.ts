@@ -7,8 +7,10 @@ import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import { findLatestCycle, type Cycle, type LiveVar } from './gfs';
 import type { LiveRequest, LiveResponse } from './live.worker';
 import type { FieldLayer, GridSpec } from '../map/fieldLayer';
+import type { WindParticles } from '../map/windParticles';
 import { CLOUD, HUMIDITY, PRECIP, SNOWFALL, SNOW_DEPTH, TEMPERATURE, WIND, type Palette } from '../map/palettes';
 import { demAt, type City, type Dem } from '../data';
+import { pointElevation } from '../map/localDem';
 import { fmt, type Quantity } from '../units';
 
 const HOUR = 3600_000;
@@ -23,21 +25,22 @@ export interface LayerDef {
   q: Quantity;
   lapse: boolean;
   legend: number[]; // metric tick values
+  legendImperial?: number[]; // tick values in imperial display units
 }
 
 export const LIVE_LAYERS: LayerDef[] = [
-  { id: 'temp', label: 'Temperature', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40] },
-  { id: 'feels', label: 'Feels like', icon: '🧍', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40] },
-  { id: 'precip', label: 'Precipitation', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25] },
+  { id: 'temp', label: 'Temperature', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90, 115] },
+  { id: 'feels', label: 'Feels like', icon: '🧍', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90, 115] },
+  { id: 'precip', label: 'Precipitation', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25], legendImperial: [0.01, 0.05, 0.2, 1] },
   { id: 'cloud', label: 'Clouds', icon: '☁', palette: CLOUD, q: 'percent', lapse: false, legend: [0, 50, 100] },
-  { id: 'wind', label: 'Wind', icon: '🌬', palette: WIND, q: 'speed', lapse: false, legend: [0, 20, 50, 100] },
+  { id: 'wind', label: 'Wind', icon: '🌬', palette: WIND, q: 'speed', lapse: false, legend: [0, 20, 50, 100], legendImperial: [0, 10, 30, 60] },
   { id: 'humidity', label: 'Humidity', icon: '💧', palette: HUMIDITY, q: 'percent', lapse: false, legend: [0, 50, 100] },
-  { id: 'snow', label: 'Snow depth', icon: '❄', palette: SNOW_DEPTH, q: 'snow', lapse: false, legend: [1, 10, 50, 200] },
+  { id: 'snow', label: 'Snow depth', icon: '❄', palette: SNOW_DEPTH, q: 'snow', lapse: false, legend: [1, 10, 50, 200], legendImperial: [1, 4, 20, 80] },
 ];
 
 const GRID: GridSpec = { nx: 1440, ny: 721, lon0: 0, lat0: 90, dx: 0.25, dy: 0.25 };
 
-type FieldData = { values: Float32Array };
+type FieldData = { values: Float32Array; u?: Float32Array; v?: Float32Array };
 
 class LivePool {
   private workers: Worker[] = [];
@@ -112,14 +115,23 @@ export class LiveController {
     const k = this.key(v, fh);
     let p = this.cache.get(k);
     if (!p) {
-      p = this.pool.request(this.cycle!, fh, v).then((r) => ({ values: r.values! }));
+      p = this.pool.request(this.cycle!, fh, v).then((r) => ({ values: r.values!, u: r.u, v: r.vv }));
       p.catch(() => this.cache.delete(k));
       this.cache.set(k, p);
-      // bound the cache (~4 MB per field)
-      if (this.cache.size > 60) this.cache.delete(this.cache.keys().next().value!);
+      // bound the cache (~4 MB per field, 12 MB for wind)
+      const weight = (key: string) => (key.includes(':wind:') ? 3 : 1);
+      let total = 0;
+      for (const key of this.cache.keys()) total += weight(key);
+      while (total > 60) {
+        const oldest = this.cache.keys().next().value!;
+        total -= weight(oldest);
+        this.cache.delete(oldest);
+      }
     }
     return p;
   }
+
+  particles?: WindParticles;
 
   activate() {
     this.active = true;
@@ -130,13 +142,15 @@ export class LiveController {
 
   deactivate() {
     this.active = false;
+    this.particles?.setEnabled(false);
   }
 
   applyPalette() {
+    this.particles?.setEnabled(this.layer.id === 'wind');
     this.field.setPalette(this.layer.palette, this.layer.alt);
     this.field.lapse = this.layer.lapse ? LAPSE : 0;
     this.field.useAlt = this.layer.alt ? 1 : 0;
-    this.field.opacity = this.layer.id === 'cloud' ? 1 : 0.92;
+    this.field.opacity = this.layer.id === 'cloud' ? 1 : this.layer.id === 'wind' ? 0.72 : 0.92;
   }
 
   setLayer(id: LiveVar) {
@@ -166,6 +180,7 @@ export class LiveController {
         if (token !== this.loadToken || !this.active) return;
         this.field.setField('fieldA', GRID, a.values);
         this.field.setField('fieldB', GRID, b.values);
+        if (this.particles && a.u && a.v && b.u && b.v) this.particles.setWind(GRID, { u: a.u, v: a.v }, { u: b.u, v: b.v });
         if (alt) this.field.setField('alt', GRID, alt.values);
         this.shown = { a: ka, b: kb, alt: '' };
         this.current.a = a.values;
@@ -183,17 +198,18 @@ export class LiveController {
     if (token !== this.loadToken && this.shown.a !== ka) return;
     this.current.mix = mix;
     this.field.mix = mix;
+    if (this.particles) this.particles.mix = mix;
     this.field.repaint();
     this.scheduleCityUpdate();
     this.onFrame();
   }
 
   /** Sample the displayed field at a point (with the same downscaling as the shader). */
-  sample(lon: number, lat: number, a = this.current.a, b = this.current.b, mix = this.current.mix, lapse = this.layer.lapse): number {
+  sample(lon: number, lat: number, a = this.current.a, b = this.current.b, mix = this.current.mix, lapse = this.layer.lapse, elev?: number): number {
     if (!a || !b) return NaN;
     const va = bilinear(a, lon, lat), vb = bilinear(b, lon, lat);
     let v = va + (vb - va) * mix;
-    if (lapse && this.orog) v += LAPSE * (bilinear(this.orog, lon, lat) - demAt(this.dem, lon, lat));
+    if (lapse && this.orog) v += LAPSE * (bilinear(this.orog, lon, lat) - (elev ?? demAt(this.dem, lon, lat)));
     return v;
   }
 
@@ -202,12 +218,13 @@ export class LiveController {
     const rel = (this.time - this.cycle!.time) / HOUR;
     const fh = Math.max(0, Math.round(rel));
     const vars: LiveVar[] = ['temp', 'feels', 'precip', 'cloud', 'wind', 'humidity', 'csnow'];
-    const res = await Promise.all(vars.map((v) => this.get(v, fh).catch(() => null)));
+    const [res, pe] = await Promise.all([Promise.all(vars.map((v) => this.get(v, fh).catch(() => null))), pointElevation(lon, lat)]);
+    const elev = pe ?? demAt(this.dem, lon, lat);
     const out: Partial<Record<LiveVar, number>> = {};
     vars.forEach((v, i) => {
       const r = res[i];
       if (!r) return;
-      out[v] = this.sample(lon, lat, r.values, r.values, 0, v === 'temp' || v === 'feels');
+      out[v] = this.sample(lon, lat, r.values, r.values, 0, v === 'temp' || v === 'feels', elev);
     });
     // 24 h temperature trend for a sparkline
     const trend: { t: number; v: number }[] = [];
@@ -215,9 +232,9 @@ export class LiveController {
     for (let k = 0; k <= 24; k += 3) if (fh + k <= 120) hours.push(fh + k);
     const tr = await Promise.all(hours.map((f) => this.get('temp', f).catch(() => null)));
     tr.forEach((r, i) => {
-      if (r) trend.push({ t: this.cycle!.time + hours[i] * HOUR, v: this.sample(lon, lat, r.values, r.values, 0, true) });
+      if (r) trend.push({ t: this.cycle!.time + hours[i] * HOUR, v: this.sample(lon, lat, r.values, r.values, 0, true, elev) });
     });
-    return { values: out, trend, time: this.cycle!.time + fh * HOUR };
+    return { values: out, trend, time: this.cycle!.time + fh * HOUR, elev };
   }
 
   // ---------- city labels ----------
@@ -235,7 +252,7 @@ export class LiveController {
     if (!src) return;
     const show = this.layer.id === 'temp' || this.layer.id === 'feels';
     const features = this.cities.map((c) => {
-      const v = show ? this.sample(c.lon, c.lat) : NaN;
+      const v = show ? this.sample(c.lon, c.lat, undefined, undefined, undefined, undefined, c.elev ?? undefined) : NaN;
       return {
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },

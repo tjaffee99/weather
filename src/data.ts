@@ -69,11 +69,13 @@ export interface City {
   minzoom: number;
   capital: boolean;
   rank: number;
+  /** metres above sea level (GeoNames SRTM), if known */
+  elev: number | null;
 }
 
 export async function loadCities(base: string): Promise<City[]> {
   const j = await (await fetch(`${base}data/cities.json`)).json();
-  return (j.rows as [string, string, number, number, number, number, number][]).map((r, i) => ({
+  return (j.rows as [string, string, number, number, number, number, number, number | null][]).map((r, i) => ({
     name: r[0],
     country: r[1],
     lat: r[2],
@@ -82,6 +84,7 @@ export async function loadCities(base: string): Promise<City[]> {
     minzoom: r[5],
     capital: r[6] === 1,
     rank: i,
+    elev: r[7] ?? null,
   }));
 }
 

@@ -38,7 +38,7 @@ export const CRITERIA: CritDef[] = [
     metric: { min: 0, max: 100, step: 10 }, imperial: { min: 0, max: 100, step: 10 }, file: 'cloud',
   },
   {
-    v: 'precip', label: 'Precipitation', hint: 'Daily total rain/snow (water equivalent)', q: 'precip', kind: 'bins',
+    v: 'precip', label: 'Precipitation', hint: 'Daily total, water equivalent (ERA5, drizzle-corrected; tropics still run wet)', q: 'precip', kind: 'bins',
     edges: [0.1, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50, 75, 100, 150], file: 'precip',
   },
   {

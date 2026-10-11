@@ -4,7 +4,7 @@ import { h, clear } from '../ui/dom';
 import { renderLegend } from '../ui/legend';
 import { cssGradient } from '../map/palettes';
 import { coordLabel, timeLabel } from '../ui/format';
-import { fmt, toDisplay, unitLabel } from '../units';
+import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
 import { nearestCity, type City } from '../data';
 import type { LiveVar } from './gfs';
 
@@ -92,7 +92,9 @@ export class LiveUI {
       l.label,
       unitLabel(l.q),
       l.palette,
-      l.legend.map((v) => ({ value: v, label: fmt(l.q, v, false) + (l.q === 'temp' ? '' : '') })),
+      units.imperial && l.legendImperial
+        ? l.legendImperial.map((d) => ({ value: fromDisplay(l.q, d), label: l.q === 'temp' ? `${d}°` : String(d) }))
+        : l.legend.map((v) => ({ value: v, label: fmt(l.q, v, false) })),
     );
   }
 
@@ -199,7 +201,7 @@ export class LiveUI {
       card.append(
         close,
         h('div', { class: 'place' }, city ? `${city.name}, ${city.country}` : 'Selected location'),
-        h('div', { class: 'coords' }, `${coordLabel(lon, lat)} · ${timeLabel(f.time)}`),
+        h('div', { class: 'coords' }, `${coordLabel(lon, lat)} · ${Math.round(f.elev)} m · ${timeLabel(f.time)}`),
         h('div', { class: 'big' }, fmt('temp', v.temp ?? NaN), h('small', {}, `feels ${fmt('temp', v.feels ?? NaN)}`)),
         h('div', { class: 'desc' }, cond),
         h(

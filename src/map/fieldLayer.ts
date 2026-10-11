@@ -42,6 +42,8 @@ uniform sampler2D u_dem;
 uniform sampler2D u_palette;   // 256 x 2
 uniform sampler2DArray u_result;
 uniform sampler2D u_cellElev;
+uniform sampler2D u_ldem;       // viewport high-res elevation (m)
+uniform vec4 u_ldemExt;         // its mercator extent x0,y0,x1,y1 (x1 <= x0: none)
 
 uniform vec4 u_grid;           // lon0, lat0, dx, dy
 uniform vec2 u_gridSize;
@@ -54,6 +56,7 @@ uniform int u_log;
 uniform float u_lapse;
 uniform float u_useAlt;
 uniform float u_opacity;
+uniform float u_cut;           // climate: values below are dimmed
 
 const float PI = 3.141592653589793;
 
@@ -99,7 +102,13 @@ vec4 bicubicArr(sampler2DArray t, vec2 uv, float layer) {
 
 float demElev(float lon, float lat) {
   float q = texture(u_dem, vec2((lon + 180.0) / 360.0, (90.0 - lat) / 180.0)).r;
-  return q * q * 9000.0;
+  float g = q * q * 9000.0;
+  if (u_ldemExt.z <= u_ldemExt.x) return g;
+  vec2 t = (v_merc - u_ldemExt.xy) / (u_ldemExt.zw - u_ldemExt.xy);
+  if (t.x < 0.0 || t.y < 0.0 || t.x > 1.0 || t.y > 1.0) return g;
+  float l = texture(u_ldem, t).r;
+  vec2 e = min(t, 1.0 - t);
+  return mix(g, l, smoothstep(0.0, 0.06, min(e.x, e.y)));
 }
 
 vec4 shade(float v, float altMix) {
@@ -139,6 +148,10 @@ void main() {
     float v = mix(r0.x / max(r0.y, 1e-4), r1.x / max(r1.y, 1e-4), lvl - l0);
     col = shade(v, 0.0);
     alpha = smoothstep(0.04, 0.35, ev.y);
+    if (u_cut > 0.0) {
+      float keep = smoothstep(u_cut - 0.012, u_cut, v);
+      col = mix(vec4(0.09, 0.11, 0.17, 0.85), col, keep);
+    }
   }
   float a = col.a * alpha * u_opacity;
   fragColor = vec4(col.rgb * a, a);
@@ -171,7 +184,7 @@ const UNIFORMS = [
   'u_projection_transition', 'u_projection_fallback_matrix', 'u_offset',
   'u_mode', 'u_fieldA', 'u_fieldB', 'u_alt', 'u_orog', 'u_dem', 'u_palette', 'u_result', 'u_cellElev',
   'u_grid', 'u_gridSize', 'u_cgrid', 'u_cgridSize', 'u_levels', 'u_mix', 'u_domain', 'u_log',
-  'u_lapse', 'u_useAlt', 'u_opacity',
+  'u_lapse', 'u_useAlt', 'u_opacity', 'u_cut', 'u_ldem', 'u_ldemExt',
 ];
 
 export class FieldLayer implements CustomLayerInterface {
@@ -195,11 +208,14 @@ export class FieldLayer implements CustomLayerInterface {
   lapse = 0;
   useAlt = 0;
   opacity = 1;
+  /** climate mode: normalised value below which results are dimmed (0 = off) */
+  cut = 0;
   private paletteDomain: [number, number] = [0, 1];
   private paletteLog = false;
   private hasA = false;
   private hasB = false;
   private hasResult = false;
+  private ldemExt: [number, number, number, number] = [0, 0, 0, 0];
 
   constructor(id: string) {
     this.id = id;
@@ -241,6 +257,7 @@ export class FieldLayer implements CustomLayerInterface {
     for (const name of ['fieldA', 'fieldB', 'alt', 'orog', 'cellElev']) this.tex[name] = this.makeTex2D(1, 1, new Float32Array([0, 0]), 2);
     this.tex.dem = this.makeR8(1, 1, new Uint8Array([0]));
     this.tex.result = this.makeArray(1, 1, 1, new Float32Array([0, 0]));
+    this.tex.ldem = this.makeTex2D(1, 1, new Float32Array([0]), 1);
     this.tex.palette = gl.createTexture()!;
   }
 
@@ -297,6 +314,20 @@ export class FieldLayer implements CustomLayerInterface {
   // ---------- public data API ----------
   setDem(w: number, h: number, q: Uint8Array) {
     this.tex.dem = this.makeR8(w, h, q, this.tex.dem);
+    this.repaint();
+  }
+
+  /** High-resolution viewport elevation; null disables it. */
+  setLocalDem(d: { width: number; height: number; data: Float32Array; extent: [number, number, number, number] } | null) {
+    if (!this.gl) return;
+    if (d) {
+      this.tex.ldem = this.makeTex2D(d.width, d.height, d.data, 1, this.tex.ldem);
+      const gl = this.gl;
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      this.ldemExt = d.extent;
+    } else {
+      this.ldemExt = [0, 0, 0, 0];
+    }
     this.repaint();
   }
 
@@ -396,6 +427,8 @@ export class FieldLayer implements CustomLayerInterface {
     bind(5, 'palette', gl.TEXTURE_2D, 'u_palette');
     bind(6, 'result', gl.TEXTURE_2D_ARRAY, 'u_result');
     bind(7, 'cellElev', gl.TEXTURE_2D, 'u_cellElev');
+    bind(8, 'ldem', gl.TEXTURE_2D, 'u_ldem');
+    gl.uniform4f(p.u.u_ldemExt, ...this.ldemExt);
 
     gl.uniform1i(p.u.u_mode, this.mode);
     const g = this.grid ?? { nx: 1, ny: 1, lon0: 0, lat0: 0, dx: 1, dy: 1 };
@@ -411,6 +444,7 @@ export class FieldLayer implements CustomLayerInterface {
     gl.uniform1f(p.u.u_lapse, this.lapse);
     gl.uniform1f(p.u.u_useAlt, this.useAlt);
     gl.uniform1f(p.u.u_opacity, this.opacity);
+    gl.uniform1f(p.u.u_cut, this.mode === 1 ? this.cut : 0);
 
     if (!this.vao) {
       this.vao = gl.createVertexArray()!;

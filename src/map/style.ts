@@ -96,7 +96,7 @@ export function baseStyle(): StyleSpecification {
         type: 'line',
         source: 'omt',
         'source-layer': 'boundary',
-        filter: ['all', ['==', ['get', 'admin_level'], 2], ['!=', ['get', 'maritime'], 1]],
+        filter: ['all', ['==', ['get', 'admin_level'], 2], ['!=', ['get', 'maritime'], 1], ['!=', ['get', 'disputed'], 1], ['!', ['has', 'claimed_by']]],
         layout: { 'line-join': 'round', 'line-cap': 'round' },
         paint: {
           'line-color': 'rgba(255,255,255,0.42)',

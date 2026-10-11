@@ -540,8 +540,32 @@ button {
   font-weight: 600;
 }
 .legend-bar {
+  position: relative;
   height: 9px;
   border-radius: 5px;
+}
+.legend-cut {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  margin-left: -1px;
+  background: #fff;
+  border-radius: 1px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.crit.cut {
+  border-top: 0;
+  padding-top: 0;
+  margin-bottom: 4px;
+}
+.crit.cut label {
+  font-weight: 500;
+  color: var(--muted);
+  cursor: default;
+}
+.cut-range {
+  padding: 2px 4px 0;
 }
 .legend-ticks {
   position: relative;

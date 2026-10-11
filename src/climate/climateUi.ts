@@ -6,6 +6,7 @@ import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { FieldLayer } from '../map/fieldLayer';
 import { SCORE, cssGradient } from '../map/palettes';
 import { demAt, nearestCity, type City, type Dem } from '../data';
+import { pointElevation } from '../map/localDem';
 import { h, clear } from '../ui/dom';
 import { RangeSlider } from '../ui/rangeSlider';
 import { renderLegend } from '../ui/legend';
@@ -36,6 +37,7 @@ export class ClimateUI {
   private playing = 0;
   private active = false;
   private cardAt: [number, number] | null = null;
+  private cut = { days: 0, date: 0 }; // minimum days/yr, minimum probability (0..1)
   private dateLabel?: HTMLElement;
   private dateRange?: HTMLInputElement;
 
@@ -161,7 +163,7 @@ export class ClimateUI {
         this.result = { data: m.data, scaleMax: m.scaleMax, mode, doy };
         this.field.mode = 1;
         this.field.setClimateResult(m.data);
-        this.renderLegendBox();
+        this.applyCut();
         this.updateCities();
         this.setStatus('');
         if (this.cardAt) this.showCard(...this.cardAt, true);
@@ -199,7 +201,7 @@ export class ClimateUI {
       presets.append(
         h('button', { class: 'chip', 'aria-pressed': String(this.preset === pr.id), onclick: () => this.setState(pr.state, pr.id) }, `${pr.icon} ${pr.label}`),
       );
-    p.append(presets);
+    p.append(presets, this.cutRow());
     for (const def of CRITERIA) p.append(this.critRow(def));
     p.append(
       h(
@@ -210,6 +212,47 @@ export class ClimateUI {
     );
     p.scrollTop = scroll;
   }
+
+  /** "Only highlight places with at least N days" — answers 'where do I get > n days a year?' */
+  private cutRow(): HTMLElement {
+    const days = this.mode === 'days';
+    const v = days ? this.cut.days : this.cut.date;
+    const fmtCut = (x: number) => (x <= 0 ? 'show all' : days ? `≥ ${x} days/yr` : `≥ ${Math.round(x * 100)}%`);
+    const val = h('span', { class: 'val' }, fmtCut(v));
+    const input = h('input', {
+      type: 'range',
+      class: 'single-range',
+      min: 0,
+      max: days ? 365 : 1,
+      step: days ? 5 : 0.05,
+      value: v,
+      'aria-label': 'Minimum to highlight',
+      oninput: () => {
+        const x = +input.value;
+        if (days) this.cut.days = x;
+        else this.cut.date = x;
+        val.textContent = fmtCut(x);
+        this.applyCut();
+      },
+    });
+    return h(
+      'div',
+      { class: 'crit cut' },
+      h('div', { class: 'crit-head' }, h('label', {}, days ? 'Highlight places with at least' : 'Highlight a chance of at least'), val),
+      h('div', { class: 'cut-range' }, input),
+    );
+  }
+
+  private applyCut() {
+    const r = this.result;
+    if (!r) return;
+    this.field.cut = r.mode === 'days' ? (this.cut.days > 0 ? Math.min(1, this.cut.days / r.scaleMax) : 0) : this.cut.date;
+    this.field.repaint();
+    this.renderLegendBox();
+    clearTimeout(this.cutTimer);
+    this.cutTimer = window.setTimeout(() => this.updateCities(), 150);
+  }
+  private cutTimer = 0;
 
   private critRow(def: CritDef): HTMLElement {
     const on = def.v in this.state;
@@ -377,10 +420,16 @@ export class ClimateUI {
     } else {
       renderLegend(this.els.legend, 'Chance of a matching day', doyLabel(this.result.doy), SCORE, [0, 0.25, 0.5, 0.75, 1].map((v) => ({ value: v, label: `${v * 100}%` })));
     }
+    if (this.field.cut > 0) {
+      const bar = this.els.legend.querySelector('.legend-bar') as HTMLElement;
+      const mk = h('div', { class: 'legend-cut' });
+      mk.style.left = `${this.field.cut * 100}%`;
+      bar.append(mk);
+    }
   }
 
   /** Bilinear sample of the result (same logic as the shader, minus the cubic smoothing). */
-  private sampleResult(lon: number, lat: number): number {
+  private sampleResult(lon: number, lat: number, elev?: number): number {
     const r = this.result, g = this.meta?.grid, et = this.cellElevTex;
     if (!r || !g || !et) return NaN;
     const x = (lon - g.lon0) / g.dx, y = (g.lat0 - lat) / g.dy;
@@ -399,7 +448,7 @@ export class ClimateUI {
       taps.push([p, w, 0]);
     }
     if (ew < 0.05) return NaN;
-    const lvl = Math.min(LEVELS - 1, Math.max(0, (demAt(this.dem, lon, lat) - ez / ew - DZ0) / DZ_STEP));
+    const lvl = Math.min(LEVELS - 1, Math.max(0, ((elev ?? demAt(this.dem, lon, lat)) - ez / ew - DZ0) / DZ_STEP));
     const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
     const n = g.nx * g.ny;
     let v = 0;
@@ -412,6 +461,16 @@ export class ClimateUI {
     return this.result?.mode === 'days' ? `${Math.round(v)} d` : `${Math.round(v * 100)}%`;
   }
 
+  private cityLabel(c: City): string {
+    const v = this.sampleResult(c.lon, c.lat, c.elev ?? undefined);
+    const r = this.result;
+    if (r && Number.isFinite(v)) {
+      const below = r.mode === 'days' ? this.cut.days > 0 && v < this.cut.days : this.cut.date > 0 && v < this.cut.date;
+      if (below) return '';
+    }
+    return this.formatScore(v);
+  }
+
   private updateCities() {
     const src = this.map.getSource('cities') as GeoJSONSource | undefined;
     if (!src || !this.active) return;
@@ -420,7 +479,7 @@ export class ClimateUI {
       features: this.cities.map((c) => ({
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
-        properties: { name: c.name, label: this.formatScore(this.sampleResult(c.lon, c.lat)), rank: c.rank, minzoom: c.minzoom },
+        properties: { name: c.name, label: this.cityLabel(c), rank: c.rank, minzoom: c.minzoom },
       })),
     });
   }
@@ -438,7 +497,7 @@ export class ClimateUI {
       card.append(close, h('div', { class: 'place' }, title), h('div', { class: 'coords' }, coordLabel(lon, lat)), h('div', { class: 'desc' }, 'Loading climate…'));
     }
     await this.ready;
-    const dem = demAt(this.dem, lon, lat);
+    const dem = (await pointElevation(lon, lat)) ?? demAt(this.dem, lon, lat);
     const crit = this.criteria();
     const base = crit.filter((c) => c.v !== 'daylight').map((c) => c.v as ClimVar);
     const render = (res: DetailResult | null) => {

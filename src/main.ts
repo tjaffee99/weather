@@ -3,6 +3,8 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles.css';
 import { baseStyle, WEATHER_BEFORE } from './map/style';
 import { FieldLayer } from './map/fieldLayer';
+import { LocalDem } from './map/localDem';
+import { WindParticles } from './map/windParticles';
 import { loadCities, loadDem, type City, type Dem } from './data';
 import { LiveController } from './live/liveController';
 import { LiveUI } from './live/liveUi';
@@ -55,6 +57,7 @@ map.addControl(
 map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
 
 const field = new FieldLayer('weather');
+const particles = new WindParticles('wind-particles');
 let marker: maplibregl.Marker | null = null;
 let mode: Mode = 'live';
 let live: LiveController;
@@ -254,13 +257,16 @@ map.on('load', async () => {
   document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
   try {
     map.addLayer(field, WEATHER_BEFORE);
+    map.addLayer(particles, 'boundary-state');
     cityLayer();
     setStatus('Loading terrain…');
     const [d, cs] = await Promise.all([loadDem(BASE), loadCities(BASE)]);
     cities = cs;
     dem = d;
     field.setDem(dem.w, dem.h, dem.q);
+    new LocalDem(map, (d) => field.setLocalDem(d));
     live = new LiveController(map, field, dem, cities);
+    live.particles = particles;
     live.onStatus = (msg, busy) => {
       if (mode === 'live') setStatus(msg, busy, !busy && !!msg);
     };
