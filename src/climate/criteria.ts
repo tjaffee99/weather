@@ -1,8 +1,12 @@
 import type { Quantity } from '../units';
 import type { CritVar } from './types';
 
+export type CritGroup = 'Temperature' | 'Sky & air' | 'Rain & wind' | 'Snow & sea';
+export const GROUPS: CritGroup[] = ['Temperature', 'Sky & air', 'Rain & wind', 'Snow & sea'];
+
 export interface CritDef {
   v: CritVar;
+  group: CritGroup;
   label: string;
   hint: string;
   q: Quantity;
@@ -18,43 +22,43 @@ export interface CritDef {
 
 export const CRITERIA: CritDef[] = [
   {
-    v: 'feels', label: 'Feels-like high', hint: 'Daytime apparent temperature (heat, humidity & wind)', q: 'temp', kind: 'continuous',
+    v: 'feels', group: 'Temperature', label: 'Feels-like high', hint: 'Daytime apparent temperature (heat, humidity & wind)', q: 'temp', kind: 'continuous',
     metric: { min: -30, max: 45, step: 1 }, imperial: { min: -20, max: 115, step: 1 }, file: 'feels',
   },
   {
-    v: 'tmax', label: 'Daytime high', hint: 'Actual air temperature, daily maximum', q: 'temp', kind: 'continuous',
+    v: 'tmax', group: 'Temperature', label: 'Daytime high', hint: 'Actual air temperature, daily maximum', q: 'temp', kind: 'continuous',
     metric: { min: -30, max: 45, step: 1 }, imperial: { min: -20, max: 115, step: 1 }, file: 'tmax',
   },
   {
-    v: 'tmin', label: 'Overnight low', hint: 'Daily minimum temperature', q: 'temp', kind: 'continuous',
+    v: 'tmin', group: 'Temperature', label: 'Overnight low', hint: 'Daily minimum temperature', q: 'temp', kind: 'continuous',
     metric: { min: -40, max: 35, step: 1 }, imperial: { min: -40, max: 95, step: 1 }, file: 'tmin',
   },
   {
-    v: 'dew', label: 'Humidity (dew point)', hint: '< 10° dry · 16° noticeable · 20°+ muggy', q: 'temp', kind: 'continuous',
+    v: 'dew', group: 'Sky & air', label: 'Humidity (dew point)', hint: '< 10° dry · 16° noticeable · 20°+ muggy', q: 'temp', kind: 'continuous',
     metric: { min: -20, max: 28, step: 1 }, imperial: { min: -5, max: 82, step: 1 }, file: 'dew',
   },
   {
-    v: 'cloud', label: 'Cloud cover', hint: 'Daytime average (9am–6pm)', q: 'percent', kind: 'continuous',
+    v: 'cloud', group: 'Sky & air', label: 'Cloud cover', hint: 'Daytime average (9am–6pm)', q: 'percent', kind: 'continuous',
     metric: { min: 0, max: 100, step: 10 }, imperial: { min: 0, max: 100, step: 10 }, file: 'cloud',
   },
   {
-    v: 'precip', label: 'Precipitation', hint: 'Daily total, water equivalent (ERA5, drizzle-corrected; tropics still run wet)', q: 'precip', kind: 'bins',
+    v: 'precip', group: 'Rain & wind', label: 'Precipitation', hint: 'Daily total, water equivalent (ERA5, drizzle-corrected; tropics still run wet)', q: 'precip', kind: 'bins',
     edges: [0.1, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50, 75, 100, 150], file: 'precip',
   },
   {
-    v: 'wind', label: 'Wind', hint: 'Strongest sustained daytime wind', q: 'speed', kind: 'bins',
+    v: 'wind', group: 'Rain & wind', label: 'Wind', hint: 'Strongest sustained daytime wind', q: 'speed', kind: 'bins',
     edges: [5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 100, 120, 150], file: 'wind',
   },
   {
-    v: 'snow', label: 'Snow on the ground', hint: 'Snow depth', q: 'snow', kind: 'bins',
+    v: 'snow', group: 'Snow & sea', label: 'Snow on the ground', hint: 'Snow depth', q: 'snow', kind: 'bins',
     edges: [1, 2.5, 5, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 400, 500], file: 'snow',
   },
   {
-    v: 'sst', label: 'Sea temperature', hint: 'Nearby ocean surface — coastal areas only', q: 'temp', kind: 'continuous',
+    v: 'sst', group: 'Snow & sea', label: 'Sea temperature', hint: 'Nearby ocean surface — coastal areas only', q: 'temp', kind: 'continuous',
     metric: { min: 0, max: 32, step: 1 }, imperial: { min: 32, max: 90, step: 1 }, file: 'sst',
   },
   {
-    v: 'daylight', label: 'Daylight', hint: 'Hours from sunrise to sunset', q: 'hours', kind: 'continuous',
+    v: 'daylight', group: 'Sky & air', label: 'Daylight', hint: 'Hours from sunrise to sunset', q: 'hours', kind: 'continuous',
     metric: { min: 0, max: 24, step: 1 }, imperial: { min: 0, max: 24, step: 1 },
   },
 ];

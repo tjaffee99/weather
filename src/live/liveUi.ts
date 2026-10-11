@@ -234,7 +234,7 @@ function renderForecast(fc: PointForecast, at: number): Node[] {
   const day = [...fc.daily].reverse().find((d) => d.t <= cur.t);
   const hl = day ? `H ${fmt('temp', day.max)}  L ${fmt('temp', day.min)}` : '';
   const stat = (k: string, v: string) => h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v));
-  const hrs = fc.hours.slice(i0, i0 + 25);
+  const hrs = threeHourly(fc, i0);
   const hourLabel = (t: number, i: number) => {
     if (i === 0) return live ? 'Now' : fmtLocal(t, tz, { hour: 'numeric' });
     const d = new Date(t);
@@ -256,7 +256,7 @@ function renderForecast(fc: PointForecast, at: number): Node[] {
         h('div', { class: 'now-sub' }, live ? 'Now' : timeLabel(cur.t)),
       ),
     ),
-    h('h3', {}, fc.source === 'Open-Meteo' ? 'Next 24 hours' : 'Next 24 hours (every 3 h)'),
+    h('h3', {}, 'Next 24 hours'),
     hourlyStrip(hrs, hourLabel),
     h(
       'div',
@@ -276,6 +276,26 @@ function renderForecast(fc: PointForecast, at: number): Node[] {
   ];
 }
 
+/**
+ * Eight widgets, one per 3 hours. Each shows the temperature at the start of
+ * its window and the most significant weather (and highest rain chance) in it.
+ */
+function threeHourly(fc: PointForecast, i0: number): Hour[] {
+  const src = fc.hours;
+  // GFS fallback is already 3-hourly
+  const step = src.length > 1 && src[1].t - src[0].t >= 3 * HOUR_MS ? 1 : 3;
+  const out: Hour[] = [];
+  for (let k = 0; k < 8; k++) {
+    const i = i0 + k * step;
+    if (i >= src.length) break;
+    const win = src.slice(i, Math.min(src.length, i + step));
+    const worst = win.reduce((a, b) => (b.code > a.code ? b : a), win[0]);
+    const pops = win.map((x) => x.pop).filter((x): x is number => x !== undefined);
+    out.push({ ...src[i], code: worst.code, isDay: src[i].isDay, pop: pops.length ? Math.max(...pops) : undefined });
+  }
+  return out;
+}
+
 function fmtLocal(t: number, tz: string | undefined, o: Intl.DateTimeFormatOptions) {
   try {
     return new Date(t).toLocaleString(undefined, { ...o, timeZone: tz });
@@ -284,11 +304,11 @@ function fmtLocal(t: number, tz: string | undefined, o: Intl.DateTimeFormatOptio
   }
 }
 
-/** Apple-style scrollable hourly strip with a temperature curve coloured by temperature. */
+/** Row of forecast widgets with a temperature curve coloured by temperature. */
 function hourlyStrip(hrs: Hour[], label: (t: number, i: number) => string): HTMLElement {
-  const COL = 48;
+  const COL = 44;
   const W = COL * hrs.length;
-  const H = 70;
+  const H = 62;
   const vs = hrs.map((x) => toDisplay('temp', x.temp));
   const lo = Math.min(...vs), hi = Math.max(...vs);
   const pad = Math.max(1, (hi - lo) * 0.15);
@@ -296,8 +316,8 @@ function hourlyStrip(hrs: Hour[], label: (t: number, i: number) => string): HTML
   const y = (v: number) => 18 + (1 - (v - (lo - pad)) / (hi + pad - (lo - pad) || 1)) * (H - 26);
   const ns = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(ns, 'svg');
-  svg.setAttribute('width', String(W));
-  svg.setAttribute('height', String(H));
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', '100%');
   svg.setAttribute('class', 'curve');
   const gid = `tg${Math.random().toString(36).slice(2, 8)}`;
   const grad = document.createElementNS(ns, 'linearGradient');
@@ -346,7 +366,6 @@ function hourlyStrip(hrs: Hour[], label: (t: number, i: number) => string): HTML
     svg.append(c, t);
   });
   const cols = h('div', { class: 'hours' });
-  cols.style.width = `${W}px`;
   hrs.forEach((hr, i) => {
     const cond = hr.code >= 0 ? condition(hr.code, hr.isDay) : null;
     cols.append(
@@ -359,7 +378,5 @@ function hourlyStrip(hrs: Hour[], label: (t: number, i: number) => string): HTML
       ),
     );
   });
-  const inner = h('div', { class: 'hourly-inner' }, cols, svg);
-  inner.style.width = `${W}px`;
-  return h('div', { class: 'hourly' }, inner);
+  return h('div', { class: 'hourly' }, cols, svg);
 }

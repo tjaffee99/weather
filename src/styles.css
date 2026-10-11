@@ -299,44 +299,185 @@ button {
   background: rgba(10, 132, 255, 0.14);
   border-color: rgba(10, 132, 255, 0.5);
 }
-.crit {
-  border-top: 1px solid var(--line);
-  padding: 10px 2px 8px;
+.section-title {
+  font-size: 11.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--muted);
+  margin: 4px 2px 6px;
 }
-.crit-head {
+.conds {
+  display: grid;
+  gap: 6px;
+}
+.cond {
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 10px 4px;
+}
+.cond-head {
   display: flex;
   align-items: center;
   gap: 8px;
 }
-.crit-head label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  font-weight: 560;
+.cond-name {
   flex: 1;
   min-width: 0;
+  font-weight: 560;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.crit-head .val {
+.cond-head .val {
   font-variant-numeric: tabular-nums;
   color: var(--accent-2);
   font-size: 12.5px;
+  font-weight: 600;
   white-space: nowrap;
 }
-.crit.off .crit-head label {
+.remove {
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 11px;
+  flex: none;
+}
+.remove:hover {
+  background: var(--fill);
+  color: var(--text);
+}
+.empty {
   color: var(--muted);
-  font-weight: 500;
+  font-size: 12.5px;
+  padding: 8px 2px;
 }
-.crit.off .val {
+.add-wrap {
+  position: relative;
+  margin: 8px 0 12px;
+}
+.add-btn {
+  width: 100%;
+  border: 1px dashed rgba(0, 0, 0, 0.2);
+  background: transparent;
+  border-radius: 12px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-weight: 560;
+  color: var(--accent-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.add-btn:hover {
+  background: rgba(10, 132, 255, 0.06);
+}
+.add-btn .caret {
+  margin-left: auto;
+  color: var(--muted);
+}
+.add-menu {
+  margin-top: 6px;
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(20, 30, 50, 0.16);
+  padding: 4px;
+}
+.menu-group {
+  font-size: 10.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
   color: var(--faint);
+  padding: 8px 8px 3px;
 }
-.crit.off .rs {
-  display: none;
+.menu-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
 }
-.crit .sub {
+.menu-item:hover {
+  background: var(--fill);
+}
+.menu-item .check {
+  width: 14px;
+  color: var(--accent);
+  font-weight: 700;
+  flex: none;
+}
+.mi-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+.mi-label {
+  font-weight: 560;
+}
+.mi-hint {
   font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mi-size {
+  font-size: 10.5px;
   color: var(--faint);
-  margin: 2px 0 0 26px;
+  white-space: nowrap;
+}
+.cut {
+  padding: 4px 2px 0;
+}
+.cut .cond-name {
+  font-weight: 500;
+  color: var(--muted);
+}
+.cut-range {
+  padding: 2px 2px 0;
+}
+.seg {
+  margin-left: auto;
+  display: flex;
+  background: var(--fill);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+.seg button {
+  border: 0;
+  background: transparent;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 560;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.seg button[aria-selected='true'] {
+  background: #fff;
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+}
+.single-range.idle::-webkit-slider-thumb {
+  background: #e6e6ea;
+}
+.single-range.idle::-moz-range-thumb {
+  background: #e6e6ea;
 }
 .toggle {
   appearance: none;
@@ -351,24 +492,12 @@ button {
   flex: none;
   cursor: pointer;
 }
-.toggle:checked {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.toggle:checked::after {
-  content: '';
-  width: 5px;
-  height: 9px;
-  border: solid #fff;
-  border-width: 0 2px 2px 0;
-  transform: translateY(-1px) rotate(45deg);
-}
 
 /* range slider */
 .rs {
   position: relative;
   height: 26px;
-  margin: 6px 4px 0 26px;
+  margin: 2px 2px 0;
 }
 .rs-track,
 .rs-fill {
@@ -461,13 +590,16 @@ button {
 }
 .timeline-top {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
+  gap: 10px;
   margin-bottom: 4px;
 }
 .timeline-label {
   font-weight: 650;
   font-size: 15px;
+}
+.timeline-top .timeline-sub:last-child {
+  margin-left: auto;
 }
 .timeline-sub {
   color: var(--muted);
@@ -557,19 +689,6 @@ button {
   background: #1d1d1f;
   border-radius: 1px;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
-}
-.crit.cut {
-  border-top: 0;
-  padding-top: 0;
-  margin-bottom: 4px;
-}
-.crit.cut label {
-  font-weight: 500;
-  color: var(--muted);
-  cursor: default;
-}
-.cut-range {
-  padding: 2px 4px 0;
 }
 .legend-ticks {
   position: relative;
@@ -809,21 +928,14 @@ table.normals thead th {
   margin-top: 1px;
 }
 .hourly {
-  overflow-x: auto;
-  margin: 0 -16px;
-  padding: 0 16px 6px;
-  scrollbar-width: thin;
-  -webkit-overflow-scrolling: touch;
-}
-.hourly-inner {
-  position: relative;
+  margin-top: 2px;
 }
 .hours {
   display: flex;
 }
 .hour {
-  width: 48px;
-  flex: none;
+  flex: 1 1 0;
+  min-width: 0;
   text-align: center;
 }
 .hour-t {
@@ -894,13 +1006,13 @@ table.normals thead th {
   }
   .panel {
     top: auto;
-    bottom: 0;
-    left: 0;
-    right: 0;
+    bottom: 96px;
+    left: 8px;
+    right: 8px;
     width: auto;
-    max-height: 55%;
-    border-radius: 18px 18px 0 0;
-    transform: translateY(100%);
+    max-height: calc(100% - 260px);
+    border-radius: 18px;
+    transform: translateY(calc(100% + 120px));
     transition: transform 0.25s ease;
   }
   .panel.open {
@@ -910,7 +1022,7 @@ table.normals thead th {
     display: block;
     position: fixed;
     left: 8px;
-    bottom: 96px;
+    top: 104px;
     z-index: 9;
     padding: 8px 12px;
     border-radius: 999px;
@@ -930,6 +1042,14 @@ table.normals thead th {
   }
   .bottombar {
     bottom: 8px;
+    padding: 8px 12px 10px;
+    gap: 10px;
+  }
+  .timeline-sub {
+    display: none;
+  }
+  .timeline-label {
+    font-size: 14px;
   }
   .card {
     left: 8px;

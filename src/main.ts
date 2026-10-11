@@ -4,17 +4,17 @@ import './styles.css';
 import { baseStyle, WATER, WEATHER_BEFORE } from './map/style';
 import { FieldLayer } from './map/fieldLayer';
 import { landDemTile, LocalDem } from './map/localDem';
-import { boundaryLayers, reverseGeocode, showBoundary } from './geocode';
+import { reverseGeocode } from './geocode';
 import { WindParticles } from './map/windParticles';
 import { loadCities, loadDem, type City, type Dem } from './data';
 import { LiveController } from './live/liveController';
 import { LiveUI } from './live/liveUi';
 import { $, h, clear } from './ui/dom';
 import { units } from './units';
-import type { ClimateUI } from './climate/climateUi';
+import { ClimateUI } from './climate/climateUi';
 
 const BASE = import.meta.env.BASE_URL;
-type Mode = 'live' | 'days' | 'date';
+type Mode = 'climate' | 'live';
 
 const els = {
   panel: $('#panel'),
@@ -68,11 +68,12 @@ map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom
 const field = new FieldLayer('weather');
 const particles = new WindParticles('wind-particles');
 let marker: maplibregl.Marker | null = null;
-let mode: Mode = 'live';
+let mode: Mode | null = null;
 let live: LiveController;
 let liveUi: LiveUI;
-let climateUi: ClimateUI | null = null;
-let liveReady: Promise<void> = Promise.resolve();
+let climateUi: ClimateUI;
+let liveReadyResolve: () => void = () => {};
+const liveReady = new Promise<void>((r) => (liveReadyResolve = r));
 let cities: City[] = [];
 let dem: Dem;
 
@@ -81,7 +82,6 @@ function closeCard() {
   clear(els.card);
   marker?.remove();
   marker = null;
-  showBoundary(map);
 }
 
 function cityLayer() {
@@ -123,7 +123,7 @@ function setWaterForMode(m: Mode) {
 }
 
 async function setMode(m: Mode) {
-  if (m === mode && (m === 'live' ? live?.active : climateUi)) return;
+  if (m === mode) return;
   const prev = mode;
   mode = m;
   document.querySelectorAll<HTMLButtonElement>('#modes button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.mode === m)));
@@ -131,37 +131,29 @@ async function setMode(m: Mode) {
   // fade the current field out instead of flashing stale data in the new mode's colours
   await field.fadeTo(0, 160);
   if (mode !== m) return;
-  if (prev === 'live' && m !== 'live') {
+  if (prev === 'live') {
     live.deactivate();
     liveUi.exit();
   }
-  if (prev !== 'live' && m === 'live') climateUi?.exit();
+  if (prev === 'climate') climateUi.exit();
   setWaterForMode(m);
+  updateUrlMode();
   if (m === 'live') {
-    els.bottom.classList.remove('hidden');
+    liveUi.enter();
     await liveReady;
     if (mode !== 'live') return;
     live.activate();
     liveUi.enter();
     live.updateCities();
   } else {
-    els.bottom.classList.toggle('hidden', m === 'days');
-    if (!climateUi) {
-      clear(els.panel);
-      els.panel.append(h('h2', {}, 'Climate'), h('p', { class: 'hint' }, 'Loading climate explorer…'));
-      const mod = await import('./climate/climateUi');
-      climateUi = new mod.ClimateUI(map, field, els, cities, dem, setStatus, closeCard, BASE);
-    }
-    if (mode !== m) return;
-    await climateUi.enter(m);
+    await climateUi.enter();
   }
-  updateUrlMode();
 }
 
 function updateUrlMode() {
   const u = new URL(location.href);
-  if (mode === 'live') u.searchParams.delete('mode');
-  else u.searchParams.set('mode', mode);
+  if (mode === 'live') u.searchParams.set('mode', 'live');
+  else u.searchParams.delete('mode');
   history.replaceState(null, '', u);
 }
 
@@ -172,26 +164,9 @@ function placeMarker(lon: number, lat: number) {
 
 function openAt(lon: number, lat: number) {
   placeMarker(lon, lat);
-  const placeP = reverseGeocode(lon, lat, map.getZoom(), cities);
-  placeP
-    .then((p) => {
-      const ll = marker?.getLngLat();
-      if (ll && ll.lng === lon && ll.lat === lat) showBoundary(map, p?.boundary);
-    })
-    .catch(() => {});
+  const placeP = reverseGeocode(lon, lat, cities);
   if (mode === 'live') liveUi.showCard(lon, lat, placeP);
   else climateUi?.showCard(lon, lat, false, placeP);
-}
-
-/** Warm up the climate explorer in the background once the live map is up. */
-async function prefetchClimate() {
-  const conn = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
-  if (conn?.saveData || /2g/.test(conn?.effectiveType ?? '')) return;
-  if (!climateUi) {
-    const mod = await import('./climate/climateUi');
-    if (!climateUi) climateUi = new mod.ClimateUI(map, field, els, cities, dem, setStatus, closeCard, BASE);
-  }
-  climateUi.prefetch();
 }
 
 // ---------- UI wiring ----------
@@ -206,7 +181,7 @@ unitsBtn.addEventListener('click', () => units.set(units.imperial ? 'metric' : '
 units.onChange(() => {
   paintUnits();
   if (mode === 'live') liveUi?.refreshUnits();
-  else climateUi?.refreshUnits();
+  else if (mode === 'climate') climateUi?.refreshUnits();
   if (marker) {
     const ll = marker.getLngLat();
     openAt(ll.lng, ll.lat);
@@ -289,7 +264,6 @@ map.on('load', async () => {
   try {
     map.addLayer(field, WEATHER_BEFORE);
     map.addLayer(particles, 'boundary-state');
-    boundaryLayers(map);
     cityLayer();
     setStatus('Loading terrain…');
     const [d, cs] = await Promise.all([loadDem(BASE), loadCities(BASE)]);
@@ -303,20 +277,22 @@ map.on('load', async () => {
       if (mode === 'live') setStatus(msg, busy, !busy && !!msg);
     };
     liveUi = new LiveUI(live, els, dem, closeCard);
-    const want = (new URL(location.href).searchParams.get('mode') as Mode) || 'live';
-    liveReady = live.init().catch((e) => {
-      console.warn(e);
-      if (mode === 'live') setStatus(`Live data unavailable: ${(e as Error).message}`, false, true);
-    });
-    if (want === 'live' || !['days', 'date'].includes(want)) {
-      liveUi.enter();
-      await liveReady;
-      live.activate();
-      liveUi.enter();
-      map.once('idle', () => setTimeout(() => prefetchClimate().catch(() => {}), 2500));
+    climateUi = new ClimateUI(map, field, els, cities, dem, setStatus, closeCard, BASE);
+    const startLive = () =>
+      live
+        .init()
+        .catch((e) => {
+          console.warn(e);
+          if (mode === 'live') setStatus(`Live data unavailable: ${(e as Error).message}`, false, true);
+        })
+        .finally(liveReadyResolve);
+    // the climate finder is the home page; the live forecast warms up behind it
+    if (new URL(location.href).searchParams.get('mode') === 'live') {
+      startLive();
+      await setMode('live');
     } else {
-      mode = 'live';
-      await setMode(want);
+      await setMode('climate');
+      startLive();
     }
   } catch (e) {
     console.error(e);

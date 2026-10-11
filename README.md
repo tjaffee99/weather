@@ -1,18 +1,19 @@
 # Weather Atlas
 
-An interactive world weather map with three modes:
+An interactive world weather map with two views:
 
-- **Live**: the latest NOAA GFS model run as a smooth temperature field (plus feels-like, precipitation, clouds, wind with animated streaks, humidity and snow depth). It has an hourly forecast scrubber with cross-fading, city temperature labels, and a point forecast when you tap the map. When you zoom in, temperatures are downscaled to the terrain, so individual valleys and ridges show up.
-- **Climate finder**: switch on conditions such as feels-like high, overnight low, humidity, cloud cover, precipitation, wind, snow on the ground, sea temperature and daylight. The map shows how many days a year each place meets all of them, based on 2001–2025 ERA5 reanalysis. A cutoff slider answers "where do I get at least N such days a year?" by dimming everything below it.
-- **Best time to go**: the same conditions, but for a chosen day of the year. The map shows the chance that a day around that date matches. Press play to animate through the year.
+- **Climate finder** (the home page): add conditions such as feels-like high, daytime high, overnight low, humidity, cloud cover, precipitation, wind, snow on the ground, sea temperature and daylight. Start from a preset (perfect day, beach, skiing…) or use the grouped "Add condition" menu. A single "when" control at the bottom switches between:
+  - **All year**: how many days a year each place meets all of your conditions, based on 2001–2025 ERA5 reanalysis. A cutoff slider answers "where do I get at least N such days a year?" by dimming everything below it.
+  - **On a date**: the chance that a day around the chosen date matches. Drag the slider or press play to animate through the year.
 
-Tap anywhere in a climate mode to get a location card. It shows the chance through the year, the best months, and monthly normals (highs, lows, sunny days, rain days, precipitation, snow days, wind and sea temperature).
+  Tap anywhere to get a location card. It shows the chance through the year, the best months, and monthly normals (highs, lows, sunny days, rain days, precipitation, snow days, wind and sea temperature).
+- **Live weather**: the latest NOAA GFS model run as a smooth temperature field (plus feels-like, precipitation, clouds, wind with animated streaks, humidity and snow depth). It has an hourly forecast scrubber with cross-fading and city temperature labels. When you zoom in, temperatures are downscaled to the terrain, so individual valleys and ridges show up. Tap the map for a point forecast: current conditions plus the next 24 hours in 3-hour steps.
 
 ## How it works
 
 ### Rendering
 
-`src/map/fieldLayer.ts` is a MapLibre custom WebGL layer. For each pixel it computes latitude and longitude and samples the data grid with cubic B-spline filtering, which gives smooth Apple-Weather-style gradients without grid artifacts. Temperature is then downscaled with a 0.1° elevation model (−6.5 °C per km), so valleys and mountain ranges stand out even though the model grid is coarser. Once you zoom past level 5, the global elevation model is replaced by a mosaic of AWS terrain tiles for the current viewport (`src/map/localDem.ts`), which brings the detail down to about 100 m. Water and borders are drawn on top from vector tiles, so coastlines stay sharp at every zoom. In climate modes the water layer also clips the results to land. The layer supports both the mercator and globe projections.
+`src/map/fieldLayer.ts` is a MapLibre custom WebGL layer. For each pixel it computes latitude and longitude and samples the data grid with cubic B-spline filtering, which gives smooth Apple-Weather-style gradients without grid artifacts. Temperature is then downscaled with a 0.1° elevation model (−6.5 °C per km), so valleys and mountain ranges stand out even though the model grid is coarser. Once you zoom past level 5, the global elevation model is replaced by a mosaic of AWS terrain tiles for the current viewport (`src/map/localDem.ts`), which brings the detail down to about 100 m. Water and borders are drawn on top from vector tiles, so coastlines stay sharp at every zoom. In the climate finder the water layer also clips the results to land. The layer supports both the mercator and globe projections.
 
 ### Live data
 

@@ -1,20 +1,17 @@
 /**
  * Reverse geocoding with OpenStreetMap Nominatim: the municipality that actually
- * contains the clicked point (with its boundary, so the map can outline it).
+ * contains the clicked point.
  * Unincorporated areas get a second, finer lookup for the community name.
  * Falls back to the bundled city list when Nominatim is unreachable.
  */
-import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
-import type { Geometry } from 'geojson';
 import { nearestCity, type City } from './data';
 
 export interface Place {
   name: string;
   detail: string; // region, country
-  boundary?: Geometry;
 }
 
-const NOMINATIM = 'https://nominatim.openstreetmap.org/reverse?format=jsonv2&polygon_geojson=1&polygon_threshold=0.0005&accept-language=en';
+const NOMINATIM = 'https://nominatim.openstreetmap.org/reverse?format=jsonv2&accept-language=en';
 let ctrl: AbortController | null = null;
 let lastRequest = 0;
 const cache = new Map<string, Place | null>();
@@ -36,9 +33,8 @@ async function nominatim(lat: number, lon: number, zoom: number, signal: AbortSi
 }
 
 const localityOf = (a: Record<string, string>) => a.city ?? a.town ?? a.village ?? a.hamlet ?? a.municipality;
-const areaGeom = (g?: Geometry) => (g && (g.type === 'Polygon' || g.type === 'MultiPolygon') ? g : undefined);
 
-export async function reverseGeocode(lon: number, lat: number, _zoom: number, cities: City[]): Promise<Place | null> {
+export async function reverseGeocode(lon: number, lat: number, cities: City[]): Promise<Place | null> {
   const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
   if (cache.has(key)) return cache.get(key)!;
   ctrl?.abort();
@@ -51,7 +47,6 @@ export async function reverseGeocode(lon: number, lat: number, _zoom: number, ci
       return null;
     }
     let a = j.address ?? {};
-    let boundary = areaGeom(j.geojson);
     let locality = localityOf(a);
     if (!locality) {
       // no town at city level (unincorporated / rural): look closer for the community name
@@ -61,7 +56,6 @@ export async function reverseGeocode(lon: number, lat: number, _zoom: number, ci
         if (kl) {
           locality = kl;
           a = { ...a, ...k.address };
-          boundary = k.addresstype && localityOf({ [k.addresstype]: kl }) ? areaGeom(k.geojson) : undefined;
         }
       }
     }
@@ -70,7 +64,7 @@ export async function reverseGeocode(lon: number, lat: number, _zoom: number, ci
       .filter(Boolean)
       .join(', ');
     const detail = [region, a.country !== name ? a.country : undefined].filter(Boolean).join(', ');
-    const place: Place = { name, detail, boundary };
+    const place: Place = { name, detail };
     cache.set(key, place);
     return place;
   } catch (e) {
@@ -78,31 +72,4 @@ export async function reverseGeocode(lon: number, lat: number, _zoom: number, ci
     const c = nearestCity(cities, lon, lat, 15);
     return c ? { name: `Near ${c.name}`, detail: c.country } : null;
   }
-}
-
-export function boundaryLayers(map: MlMap) {
-  map.addSource('place-boundary', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
-  map.addLayer({
-    id: 'place-fill',
-    type: 'fill',
-    source: 'place-boundary',
-    paint: { 'fill-color': '#0a84ff', 'fill-opacity': 0.07 },
-  });
-  map.addLayer({
-    id: 'place-casing',
-    type: 'line',
-    source: 'place-boundary',
-    paint: { 'line-color': 'rgba(255,255,255,0.9)', 'line-width': 4.5 },
-  });
-  map.addLayer({
-    id: 'place-line',
-    type: 'line',
-    source: 'place-boundary',
-    paint: { 'line-color': '#0a6ee0', 'line-width': 2 },
-  });
-}
-
-export function showBoundary(map: MlMap, geom?: Geometry) {
-  const src = map.getSource('place-boundary') as GeoJSONSource | undefined;
-  src?.setData({ type: 'FeatureCollection', features: geom ? [{ type: 'Feature', geometry: geom, properties: {} }] : [] });
 }

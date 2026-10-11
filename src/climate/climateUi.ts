@@ -1,6 +1,8 @@
 /**
- * Climate explorer UI: criteria panel, presets, date slider ("best time to go"),
- * legend, city labels with results, and a location card with monthly normals.
+ * Climate finder UI: conditions panel (presets, active conditions, grouped
+ * "add condition" menu), one "when" control (all year, or a date on the
+ * slider), legend, city labels with results, and a location card with
+ * monthly normals.
  */
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { FieldLayer } from '../map/fieldLayer';
@@ -13,7 +15,7 @@ import { RangeSlider } from '../ui/rangeSlider';
 import { renderLegend } from '../ui/legend';
 import { MONTHS, MONTH_START, coordLabel, doyLabel, todayDoy } from '../ui/format';
 import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
-import { CRITERIA, PRESETS, type CritDef, type CritState } from './criteria';
+import { CRITERIA, GROUPS, PRESETS, type CritDef, type CritState } from './criteria';
 import { DZ0, DZ_STEP, LEVELS, type ClimVar, type ClimateMeta, type CritVar, type Criterion, type DetailResult } from './types';
 
 type Els = { panel: HTMLElement; bottom: HTMLElement; legend: HTMLElement; card: HTMLElement };
@@ -80,6 +82,12 @@ export class ClimateUI {
       };
       this.worker.onerror = (e) => reject(new Error(e.message));
     });
+    document.addEventListener('pointerdown', (e) => {
+      if (this.menuOpen && !(e.target as Element).closest?.('.add-wrap')) {
+        this.menuOpen = false;
+        this.renderPanel();
+      }
+    });
     // workers resolve relative URLs against their own script, so pass an absolute base
     this.worker.postMessage({ type: 'init', base: new URL(base, location.href).href });
   }
@@ -103,15 +111,8 @@ export class ClimateUI {
     else if (t) this.setStatus('Crunching 25 years of weather…');
   }
 
-  /** Start downloading what the current conditions need, without touching the map. */
-  prefetch() {
-    const vars = this.criteria().filter((c) => c.v !== 'daylight').map((c) => c.v);
-    this.ready.then(() => this.call({ type: 'need', vars })).catch(() => {});
-  }
-
-  async enter(mode: Mode) {
+  async enter() {
     this.active = true;
-    this.mode = mode;
     this.field.fade = 0;
     this.field.mode = 1;
     this.field.lapse = 0;
@@ -197,18 +198,21 @@ export class ClimateUI {
   }
 
   // ---------- panel ----------
+  private menuOpen = false;
+
   private renderPanel() {
     const p = this.els.panel;
     const scroll = p.scrollTop;
     clear(p);
+    const year = this.mode === 'days';
     p.append(
-      h('h2', {}, this.mode === 'days' ? 'Find your climate' : 'Best time to go'),
+      h('h2', {}, 'Find your climate'),
       h(
         'p',
         { class: 'hint' },
-        this.mode === 'days'
-          ? 'Colours show how many days a year match every condition you switch on — based on 25 years (2001–2025) of hourly ERA5 history.'
-          : 'Colours show the chance that a day around the chosen date matches every condition — drag the date below or press play.',
+        year
+          ? 'Days per year that match all of your conditions, from 25 years of weather history (2001–2025). Pick a date below to see the chance on a given day.'
+          : `Chance that a day around ${doyLabel(this.doy, true)} matches all of your conditions (2001–2025).`,
       ),
     );
     const presets = h('div', { class: 'presets' });
@@ -216,8 +220,14 @@ export class ClimateUI {
       presets.append(
         h('button', { class: 'chip', 'aria-pressed': String(this.preset === pr.id), onclick: () => this.setState(pr.state, pr.id) }, `${pr.icon} ${pr.label}`),
       );
-    p.append(presets, this.cutRow());
-    for (const def of CRITERIA) p.append(this.critRow(def));
+    p.append(presets);
+
+    const list = h('div', { class: 'conds' });
+    const active = CRITERIA.filter((d) => d.v in this.state);
+    for (const def of active) list.append(this.condRow(def));
+    if (!active.length) list.append(h('div', { class: 'empty' }, 'No conditions yet — every day counts. Add one below.'));
+    p.append(h('div', { class: 'section-title' }, 'Your conditions'), list, this.addMenu());
+    p.append(this.cutRow());
     p.append(
       h(
         'div',
@@ -228,11 +238,85 @@ export class ClimateUI {
     p.scrollTop = scroll;
   }
 
+  /** One active condition: name, current range, remove button and slider. */
+  private condRow(def: CritDef): HTMLElement {
+    const cur = this.state[def.v]!;
+    const val = h('span', { class: 'val' }, describe(def, cur));
+    const remove = h(
+      'button',
+      {
+        class: 'remove',
+        'aria-label': `Remove ${def.label}`,
+        title: 'Remove',
+        onclick: () => {
+          const s = structuredClone(this.state);
+          delete s[def.v];
+          this.setState(s, null);
+        },
+      },
+      '✕',
+    );
+    const sl = this.makeSlider(def, cur, (r) => (val.textContent = describe(def, r)));
+    return h('div', { class: 'cond', title: def.hint }, h('div', { class: 'cond-head' }, h('span', { class: 'cond-name' }, def.label), val, remove), sl.el);
+  }
+
+  /** "+ Add condition" dropdown, grouped by theme. */
+  private addMenu(): HTMLElement {
+    const wrap = h('div', { class: 'add-wrap' });
+    const btn = h(
+      'button',
+      {
+        class: 'add-btn',
+        'aria-expanded': String(this.menuOpen),
+        onclick: () => {
+          this.menuOpen = !this.menuOpen;
+          this.renderPanel();
+        },
+      },
+      h('span', { 'aria-hidden': 'true' }, '+'),
+      ' Add condition',
+      h('span', { class: 'caret', 'aria-hidden': 'true' }, this.menuOpen ? '▴' : '▾'),
+    );
+    wrap.append(btn);
+    if (!this.menuOpen) return wrap;
+    const menu = h('div', { class: 'add-menu', role: 'menu' });
+    for (const g of GROUPS) {
+      const items = CRITERIA.filter((d) => d.group === g);
+      menu.append(h('div', { class: 'menu-group' }, g));
+      for (const def of items) {
+        const on = def.v in this.state;
+        const size = def.file && this.meta && !on ? `${(this.meta.vars[def.file as ClimVar].bytes / 1e6).toFixed(1)} MB` : '';
+        menu.append(
+          h(
+            'button',
+            {
+              class: 'menu-item',
+              role: 'menuitemcheckbox',
+              'aria-checked': String(on),
+              onclick: () => {
+                const s = structuredClone(this.state);
+                if (on) delete s[def.v];
+                else s[def.v] = this.defaultRange(def);
+                this.menuOpen = false;
+                this.setState(s, null);
+              },
+            },
+            h('span', { class: 'check', 'aria-hidden': 'true' }, on ? '✓' : ''),
+            h('span', { class: 'mi-text' }, h('span', { class: 'mi-label' }, def.label), h('span', { class: 'mi-hint' }, def.hint)),
+            h('span', { class: 'mi-size' }, size),
+          ),
+        );
+      }
+    }
+    wrap.append(menu);
+    return wrap;
+  }
+
   /** "Only highlight places with at least N days" — answers 'where do I get > n days a year?' */
   private cutRow(): HTMLElement {
     const days = this.mode === 'days';
     const v = days ? this.cut.days : this.cut.date;
-    const fmtCut = (x: number) => (x <= 0 ? 'show all' : days ? `≥ ${x} days/yr` : `≥ ${Math.round(x * 100)}%`);
+    const fmtCut = (x: number) => (x <= 0 ? 'off' : days ? `≥ ${x} days/yr` : `≥ ${Math.round(x * 100)}%`);
     const val = h('span', { class: 'val' }, fmtCut(v));
     const input = h('input', {
       type: 'range',
@@ -252,8 +336,8 @@ export class ClimateUI {
     });
     return h(
       'div',
-      { class: 'crit cut' },
-      h('div', { class: 'crit-head' }, h('label', {}, days ? 'Highlight places with at least' : 'Highlight a chance of at least'), val),
+      { class: 'cut' },
+      h('div', { class: 'cond-head' }, h('span', { class: 'cond-name' }, days ? 'Only highlight places with at least' : 'Only highlight a chance of at least'), val),
       h('div', { class: 'cut-range' }, input),
     );
   }
@@ -268,37 +352,6 @@ export class ClimateUI {
     this.cutTimer = window.setTimeout(() => this.updateCities(), 150);
   }
   private cutTimer = 0;
-
-  private critRow(def: CritDef): HTMLElement {
-    const on = def.v in this.state;
-    const cur = this.state[def.v] ?? this.defaultRange(def);
-    const val = h('span', { class: 'val' }, describe(def, cur));
-    const toggle = h('input', {
-      type: 'checkbox',
-      class: 'toggle',
-      checked: on,
-      onchange: (e: Event) => {
-        const s = structuredClone(this.state);
-        if ((e.target as HTMLInputElement).checked) s[def.v] = this.defaultRange(def);
-        else delete s[def.v];
-        this.setState(s, null);
-      },
-    });
-    const sizeNote = def.file && this.meta && !on ? ` · ${(this.meta.vars[def.file as ClimVar].bytes / 1e6).toFixed(1)} MB` : '';
-    const row = h(
-      'div',
-      { class: `crit${on ? '' : ' off'}` },
-      h('div', { class: 'crit-head' }, h('label', {}, toggle, def.label), val),
-      h('div', { class: 'sub' }, def.hint + sizeNote),
-    );
-    if (on) {
-      const sl = this.makeSlider(def, cur, (r) => {
-        val.textContent = describe(def, r);
-      });
-      row.append(sl.el);
-    }
-    return row;
-  }
 
   private defaultRange(def: CritDef): [number, number] {
     const I = Infinity;
@@ -353,18 +406,15 @@ export class ClimateUI {
     });
   }
 
-  // ---------- bottom bar (date) ----------
+  // ---------- bottom bar: "when" ----------
   private renderBottom() {
     const b = this.els.bottom;
     clear(b);
-    if (this.mode !== 'date') {
-      b.classList.add('hidden');
-      return;
-    }
     b.classList.remove('hidden');
+    const year = this.mode === 'days';
     this.dateRange = h('input', {
       type: 'range',
-      class: 'single-range',
+      class: `single-range${year ? ' idle' : ''}`,
       min: 0,
       max: 364,
       step: 1,
@@ -375,7 +425,7 @@ export class ClimateUI {
         this.setDoy(+this.dateRange!.value);
       },
     });
-    this.dateLabel = h('span', { class: 'timeline-label' }, doyLabel(this.doy, true));
+    this.dateLabel = h('span', { class: 'timeline-label' }, year ? 'All year' : doyLabel(this.doy, true));
     const ticks = h('div', { class: 'ticks' });
     MONTHS.forEach((m, i) => {
       const s = h('span', {}, m);
@@ -383,26 +433,49 @@ export class ClimateUI {
       ticks.append(s);
     });
     const play = h('button', { class: 'play', 'aria-label': 'Play through the year', onclick: () => (this.playing ? this.stopPlay() : this.play()) }, '▶');
+    const seg = h(
+      'div',
+      { class: 'seg', role: 'tablist', 'aria-label': 'When' },
+      h('button', { role: 'tab', 'aria-selected': String(year), onclick: () => this.setWhen('days') }, 'All year'),
+      h('button', { role: 'tab', 'aria-selected': String(!year), onclick: () => this.setWhen('date') }, 'On a date'),
+    );
     b.append(
       play,
       h(
         'div',
         { class: 'timeline' },
-        h('div', { class: 'timeline-top' }, this.dateLabel, h('span', { class: 'timeline-sub' }, `± ${HALF_WINDOW} days · 2001–2025`)),
+        h('div', { class: 'timeline-top' }, this.dateLabel, h('span', { class: 'timeline-sub' }, year ? 'days per year' : `± ${HALF_WINDOW} days`), seg),
         this.dateRange,
         ticks,
       ),
     );
   }
 
+  /** Switch between "days per year" and "chance on a date". */
+  private setWhen(m: Mode) {
+    if (m === 'days') this.stopPlay();
+    if (this.mode === m) return;
+    this.mode = m;
+    this.renderPanel();
+    this.renderBottom();
+    this.requery();
+  }
+
   private setDoy(d: number) {
     this.doy = ((Math.round(d) % 365) + 365) % 365;
+    if (this.mode !== 'date') {
+      this.setWhen('date');
+      return;
+    }
     if (this.dateLabel) this.dateLabel.textContent = doyLabel(this.doy, true);
     if (this.dateRange) this.dateRange.value = String(this.doy);
+    const hint = this.els.panel.querySelector('.hint');
+    if (hint) hint.textContent = `Chance that a day around ${doyLabel(this.doy, true)} matches all of your conditions (2001–2025).`;
     this.requery();
   }
 
   private play() {
+    if (this.mode !== 'date') this.setWhen('date');
     const btn = this.els.bottom.querySelector('.play');
     if (btn) btn.textContent = '❚❚';
     let last = performance.now();
@@ -590,7 +663,11 @@ export class ClimateUI {
   private readUrl(): CritState | null {
     const u = new URL(location.href);
     const d = u.searchParams.get('d');
-    if (d !== null && Number.isFinite(+d)) this.doy = Math.min(364, Math.max(0, +d));
+    if (d !== null && Number.isFinite(+d)) {
+      this.doy = Math.min(364, Math.max(0, +d));
+      this.mode = 'date';
+    }
+    if (u.searchParams.get('mode') === 'date') this.mode = 'date';
     const c = u.searchParams.get('c');
     if (c === null) return null;
     const s: CritState = {};
