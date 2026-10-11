@@ -1,9 +1,10 @@
 import maplibregl, { type Map as MlMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './styles.css';
-import { baseStyle, WEATHER_BEFORE } from './map/style';
+import { baseStyle, WATER, WEATHER_BEFORE } from './map/style';
 import { FieldLayer } from './map/fieldLayer';
-import { LocalDem } from './map/localDem';
+import { landDemTile, LocalDem } from './map/localDem';
+import { boundaryLayers, reverseGeocode, showBoundary } from './geocode';
 import { WindParticles } from './map/windParticles';
 import { loadCities, loadDem, type City, type Dem } from './data';
 import { LiveController } from './live/liveController';
@@ -24,18 +25,26 @@ const els = {
 
 // ---------- status toast ----------
 const statusEl = $('#status');
-function setStatus(msg: string, busy = true, error = false) {
+const progressEl = h('div', { class: 'progress hidden' }, h('div'));
+statusEl.append(progressEl);
+function setStatus(msg: string, busy = true, error = false, progress?: number) {
   statusEl.classList.toggle('hidden', !msg);
   statusEl.classList.toggle('error', error);
   $('#statusText').textContent = msg;
   if (!busy) statusEl.querySelector('.spinner')?.classList.add('hidden');
   else statusEl.querySelector('.spinner')?.classList.remove('hidden');
+  progressEl.classList.toggle('hidden', progress === undefined);
+  if (progress !== undefined) (progressEl.firstChild as HTMLElement).style.width = `${Math.round(progress * 100)}%`;
 }
+
+// terrain shading without the sea floor
+maplibregl.addProtocol('landdem', async (params) => ({ data: await landDemTile(params.url) }));
 
 // ---------- map ----------
 const map: MlMap = new maplibregl.Map({
   container: 'map',
-  style: baseStyle(),
+  // absolute URL: MapLibre fetches GeoJSON from a worker
+  style: baseStyle(new URL(`${BASE}data/coastline.json`, location.href).href),
   center: [0, 28],
   zoom: Math.max(0.6, Math.log2(Math.max(320, window.innerWidth - (window.innerWidth > 760 ? 340 : 0)) / 512) + 0.15),
   minZoom: 0,
@@ -50,7 +59,7 @@ map.addControl(
   new maplibregl.AttributionControl({
     compact: true,
     customAttribution:
-      'Forecast: <a href="https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast">NOAA GFS</a> · Climate: <a href="https://cds.climate.copernicus.eu/">Copernicus ERA5</a> via <a href="https://github.com/google-research/arco-era5">ARCO-ERA5</a> · <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://www.naturalearthdata.com/">Natural Earth</a>',
+      'Map forecast: <a href="https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast">NOAA GFS</a> · Point forecasts: <a href="https://open-meteo.com/">Open-Meteo</a> · Places: <a href="https://nominatim.org/">Nominatim</a> · Climate: <a href="https://cds.climate.copernicus.eu/">Copernicus ERA5</a> via <a href="https://github.com/google-research/arco-era5">ARCO-ERA5</a> · <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://www.naturalearthdata.com/">Natural Earth</a>',
   }),
   'bottom-right',
 );
@@ -72,6 +81,7 @@ function closeCard() {
   clear(els.card);
   marker?.remove();
   marker = null;
+  showBoundary(map);
 }
 
 function cityLayer() {
@@ -96,10 +106,10 @@ function cityLayer() {
       'text-max-width': 8,
     },
     paint: {
-      'text-color': '#ffffff',
-      'text-halo-color': 'rgba(10,14,24,0.6)',
-      'text-halo-width': 1.4,
-      'text-halo-blur': 0.6,
+      'text-color': '#1b1d21',
+      'text-halo-color': 'rgba(255,255,255,0.88)',
+      'text-halo-width': 1.6,
+      'text-halo-blur': 0.4,
     },
   });
 }
@@ -108,8 +118,8 @@ function cityLayer() {
 function setWaterForMode(m: Mode) {
   if (!map.getLayer('water')) return;
   // < 1 keeps the fill in MapLibre's translucent pass so it draws after (above) the custom layer
-  map.setPaintProperty('water', 'fill-opacity', m === 'live' ? 0.22 : 0.995);
-  map.setPaintProperty('water', 'fill-color', m === 'live' ? '#0a0f19' : '#101828');
+  map.setPaintProperty('water', 'fill-opacity', m === 'live' ? 0.18 : 0.995);
+  map.setPaintProperty('water', 'fill-color', WATER);
 }
 
 async function setMode(m: Mode) {
@@ -118,6 +128,9 @@ async function setMode(m: Mode) {
   mode = m;
   document.querySelectorAll<HTMLButtonElement>('#modes button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.mode === m)));
   closeCard();
+  // fade the current field out instead of flashing stale data in the new mode's colours
+  await field.fadeTo(0, 160);
+  if (mode !== m) return;
   if (prev === 'live' && m !== 'live') {
     live.deactivate();
     liveUi.exit();
@@ -159,8 +172,26 @@ function placeMarker(lon: number, lat: number) {
 
 function openAt(lon: number, lat: number) {
   placeMarker(lon, lat);
-  if (mode === 'live') liveUi.showCard(lon, lat);
-  else climateUi?.showCard(lon, lat);
+  const placeP = reverseGeocode(lon, lat, map.getZoom(), cities);
+  placeP
+    .then((p) => {
+      const ll = marker?.getLngLat();
+      if (ll && ll.lng === lon && ll.lat === lat) showBoundary(map, p?.boundary);
+    })
+    .catch(() => {});
+  if (mode === 'live') liveUi.showCard(lon, lat, placeP);
+  else climateUi?.showCard(lon, lat, false, placeP);
+}
+
+/** Warm up the climate explorer in the background once the live map is up. */
+async function prefetchClimate() {
+  const conn = (navigator as Navigator & { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
+  if (conn?.saveData || /2g/.test(conn?.effectiveType ?? '')) return;
+  if (!climateUi) {
+    const mod = await import('./climate/climateUi');
+    if (!climateUi) climateUi = new mod.ClimateUI(map, field, els, cities, dem, setStatus, closeCard, BASE);
+  }
+  climateUi.prefetch();
 }
 
 // ---------- UI wiring ----------
@@ -258,6 +289,7 @@ map.on('load', async () => {
   try {
     map.addLayer(field, WEATHER_BEFORE);
     map.addLayer(particles, 'boundary-state');
+    boundaryLayers(map);
     cityLayer();
     setStatus('Loading terrain…');
     const [d, cs] = await Promise.all([loadDem(BASE), loadCities(BASE)]);
@@ -270,7 +302,7 @@ map.on('load', async () => {
     live.onStatus = (msg, busy) => {
       if (mode === 'live') setStatus(msg, busy, !busy && !!msg);
     };
-    liveUi = new LiveUI(live, els, cities, closeCard);
+    liveUi = new LiveUI(live, els, dem, closeCard);
     const want = (new URL(location.href).searchParams.get('mode') as Mode) || 'live';
     liveReady = live.init().catch((e) => {
       console.warn(e);
@@ -281,6 +313,7 @@ map.on('load', async () => {
       await liveReady;
       live.activate();
       liveUi.enter();
+      map.once('idle', () => setTimeout(() => prefetchClimate().catch(() => {}), 2500));
     } else {
       mode = 'live';
       await setMode(want);

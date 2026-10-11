@@ -5,7 +5,8 @@
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { FieldLayer } from '../map/fieldLayer';
 import { SCORE, cssGradient } from '../map/palettes';
-import { demAt, nearestCity, type City, type Dem } from '../data';
+import { demAt, type City, type Dem } from '../data';
+import type { Place } from '../geocode';
 import { pointElevation } from '../map/localDem';
 import { h, clear } from '../ui/dom';
 import { RangeSlider } from '../ui/rangeSlider';
@@ -38,6 +39,8 @@ export class ClimateUI {
   private active = false;
   private cardAt: [number, number] | null = null;
   private cut = { days: 0, date: 0 }; // minimum days/yr, minimum probability (0..1)
+  private lastMode: Mode | null = null;
+  private cardPlace: Promise<Place | null> = Promise.resolve(null);
   private dateLabel?: HTMLElement;
   private dateRange?: HTMLInputElement;
 
@@ -47,7 +50,7 @@ export class ClimateUI {
     private els: Els,
     private cities: City[],
     private dem: Dem,
-    private setStatus: (m: string, busy?: boolean, err?: boolean) => void,
+    private setStatus: (m: string, busy?: boolean, err?: boolean, progress?: number) => void,
     private closeCard: () => void,
     base: string,
   ) {
@@ -90,22 +93,32 @@ export class ClimateUI {
   }
 
   private showProgress() {
+    if (!this.active) return;
     let l = 0, t = 0;
     for (const [a, b] of this.progress.values()) {
       l += a;
       t += b;
     }
-    if (t && l < t) this.setStatus(`Downloading climate history… ${(l / 1e6).toFixed(1)} / ${(t / 1e6).toFixed(1)} MB`);
+    if (t && l < t) this.setStatus(`Downloading 25 years of weather history… ${(l / 1e6).toFixed(1)} / ${(t / 1e6).toFixed(1)} MB`, true, false, l / t);
+    else if (t) this.setStatus('Crunching 25 years of weather…');
+  }
+
+  /** Start downloading what the current conditions need, without touching the map. */
+  prefetch() {
+    const vars = this.criteria().filter((c) => c.v !== 'daylight').map((c) => c.v);
+    this.ready.then(() => this.call({ type: 'need', vars })).catch(() => {});
   }
 
   async enter(mode: Mode) {
     this.active = true;
     this.mode = mode;
+    this.field.fade = 0;
     this.field.mode = 1;
     this.field.lapse = 0;
     this.field.useAlt = 0;
-    this.field.opacity = 0.95;
+    this.field.opacity = 0.92;
     this.field.setPalette(SCORE);
+    this.lastMode = null;
     this.renderPanel();
     this.renderBottom();
     if (!this.meta) this.setStatus('Loading climate data…');
@@ -164,6 +177,8 @@ export class ClimateUI {
         this.field.mode = 1;
         this.field.setClimateResult(m.data);
         this.applyCut();
+        if (this.field.fade < 1 && this.lastMode !== mode) this.field.fadeTo(1, 280);
+        this.lastMode = mode;
         this.updateCities();
         this.setStatus('');
         if (this.cardAt) this.showCard(...this.cardAt, true);
@@ -485,26 +500,30 @@ export class ClimateUI {
   }
 
   // ---------- location card ----------
-  async showCard(lon: number, lat: number, quiet = false) {
+  async showCard(lon: number, lat: number, quiet = false, placeP?: Promise<Place | null>) {
     this.cardAt = [lon, lat];
     const card = this.els.card;
-    const city = nearestCity(this.cities, lon, lat);
-    const title = city ? `${city.name}, ${city.country}` : 'Selected location';
+    if (placeP) this.cardPlace = placeP.catch(() => null);
     const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => ((this.cardAt = null), this.closeCard()) }, '✕');
+    let title = '…';
+    let detail = '';
     if (!quiet) {
       clear(card);
       card.classList.remove('hidden');
       card.append(close, h('div', { class: 'place' }, title), h('div', { class: 'coords' }, coordLabel(lon, lat)), h('div', { class: 'desc' }, 'Loading climate…'));
     }
     await this.ready;
-    const dem = (await pointElevation(lon, lat)) ?? demAt(this.dem, lon, lat);
+    const [pe, place] = await Promise.all([pointElevation(lon, lat).catch(() => null), this.cardPlace]);
+    const dem = pe ?? demAt(this.dem, lon, lat);
+    title = place?.name ?? 'Selected location';
+    detail = place?.detail ?? '';
     const crit = this.criteria();
     const base = crit.filter((c) => c.v !== 'daylight').map((c) => c.v as ClimVar);
     const render = (res: DetailResult | null) => {
       if (this.cardAt?.[0] !== lon || this.cardAt?.[1] !== lat) return;
       clear(card);
       card.classList.remove('hidden');
-      card.append(close, h('div', { class: 'place' }, title), h('div', { class: 'coords' }, `${coordLabel(lon, lat)} · ${Math.round(dem)} m`));
+      card.append(close, h('div', { class: 'place' }, title), h('div', { class: 'coords' }, [detail, coordLabel(lon, lat), `${Math.round(dem)} m`].filter(Boolean).join(' · ')));
       if (!res) {
         card.append(h('div', { class: 'desc' }, 'No climate data here (open ocean or Antarctica).'));
         return;
@@ -623,7 +642,7 @@ function yearChart(daily: Float32Array, mark: number): SVGSVGElement {
   grad.setAttribute('x2', '0');
   grad.setAttribute('y1', '1');
   grad.setAttribute('y2', '0');
-  grad.innerHTML = '<stop offset="0" stop-color="#3b3f9a"/><stop offset="0.45" stop-color="#2aa1b8"/><stop offset="0.75" stop-color="#93d95a"/><stop offset="1" stop-color="#fff3a8"/>';
+  grad.innerHTML = '<stop offset="0" stop-color="#b4e0b0"/><stop offset="0.4" stop-color="#3eaec4"/><stop offset="1" stop-color="#1c3a85"/>';
   const defs = document.createElementNS(ns, 'defs');
   defs.append(grad);
   svg.append(defs);
@@ -633,7 +652,7 @@ function yearChart(daily: Float32Array, mark: number): SVGSVGElement {
     l.setAttribute('x2', String(W));
     l.setAttribute('y1', String(y(g)));
     l.setAttribute('y2', String(y(g)));
-    l.setAttribute('stroke', 'rgba(255,255,255,0.1)');
+    l.setAttribute('stroke', 'rgba(0,0,0,0.08)');
     svg.append(l);
   }
   const path = document.createElementNS(ns, 'path');
@@ -647,7 +666,7 @@ function yearChart(daily: Float32Array, mark: number): SVGSVGElement {
     t.setAttribute('y', String(H - 3));
     t.setAttribute('text-anchor', 'middle');
     t.setAttribute('font-size', '9');
-    t.setAttribute('fill', 'rgba(235,240,250,0.5)');
+    t.setAttribute('fill', 'rgba(29,29,31,0.5)');
     t.textContent = m[0];
     svg.append(t);
   });
@@ -657,7 +676,7 @@ function yearChart(daily: Float32Array, mark: number): SVGSVGElement {
     l.setAttribute('x2', String(x(mark)));
     l.setAttribute('y1', String(top - 4));
     l.setAttribute('y2', String(H - bottom));
-    l.setAttribute('stroke', '#fff');
+    l.setAttribute('stroke', '#1d1d1f');
     l.setAttribute('stroke-width', '1.5');
     svg.append(l);
   }
@@ -665,7 +684,7 @@ function yearChart(daily: Float32Array, mark: number): SVGSVGElement {
   lab.setAttribute('x', '2');
   lab.setAttribute('y', String(y(ymax) + 9));
   lab.setAttribute('font-size', '9');
-  lab.setAttribute('fill', 'rgba(235,240,250,0.45)');
+  lab.setAttribute('fill', 'rgba(29,29,31,0.45)');
   lab.textContent = `${Math.round(ymax * 100)}%`;
   svg.append(lab);
   return svg;

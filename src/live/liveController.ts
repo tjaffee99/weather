@@ -10,7 +10,7 @@ import type { FieldLayer, GridSpec } from '../map/fieldLayer';
 import type { WindParticles } from '../map/windParticles';
 import { CLOUD, HUMIDITY, PRECIP, SNOWFALL, SNOW_DEPTH, TEMPERATURE, WIND, type Palette } from '../map/palettes';
 import { demAt, type City, type Dem } from '../data';
-import { pointElevation } from '../map/localDem';
+import { codeFromFields, isDaytime, type Hour, type PointForecast } from './pointForecast';
 import { fmt, type Quantity } from '../units';
 
 const HOUR = 3600_000;
@@ -86,6 +86,8 @@ export class LiveController {
   onStatus: (msg: string, busy: boolean) => void = () => {};
   onTimeRange: () => void = () => {};
   onFrame: () => void = () => {};
+  /** called when a new layer's data replaces the old one on screen */
+  onSwap: () => void = () => {};
 
   constructor(
     private map: MlMap,
@@ -135,9 +137,9 @@ export class LiveController {
 
   activate() {
     this.active = true;
-    this.field.mode = 0;
-    this.applyPalette();
-    this.show(this.time);
+    // force a fresh upload so the field fades in with the right palette
+    this.shown = { a: '', b: '', alt: '' };
+    this.show(this.time, true);
   }
 
   deactivate() {
@@ -147,21 +149,22 @@ export class LiveController {
 
   applyPalette() {
     this.particles?.setEnabled(this.layer.id === 'wind');
+    this.field.mode = 0;
     this.field.setPalette(this.layer.palette, this.layer.alt);
     this.field.lapse = this.layer.lapse ? LAPSE : 0;
     this.field.useAlt = this.layer.alt ? 1 : 0;
-    this.field.opacity = this.layer.id === 'cloud' ? 1 : this.layer.id === 'wind' ? 0.72 : 0.92;
+    this.field.opacity = this.layer.id === 'cloud' ? 1 : this.layer.id === 'wind' ? 0.75 : 0.88;
   }
 
+  /** Switch layer: the old layer stays on screen until the new data is ready, then cross-fades. */
   setLayer(id: LiveVar) {
     this.layer = LIVE_LAYERS.find((l) => l.id === id)!;
     this.shown = { a: '', b: '', alt: '' };
-    this.applyPalette();
-    this.show(this.time);
+    this.show(this.time, true);
   }
 
   /** Display valid time t (ms); cross-fades between the two bracketing hours. */
-  async show(t: number) {
+  async show(t: number, swap = false) {
     if (!this.cycle) return;
     this.time = Math.min(this.maxTime, Math.max(this.minTime, t));
     const rel = (this.time - this.cycle.time) / HOUR;
@@ -178,6 +181,12 @@ export class LiveController {
         let alt: FieldData | undefined;
         if (this.layer.alt) alt = await this.get('csnow', mix < 0.5 ? fhA : fhB);
         if (token !== this.loadToken || !this.active) return;
+        if (swap) {
+          await this.field.fadeTo(0, 140);
+          if (token !== this.loadToken || !this.active) return;
+          this.applyPalette();
+          this.onSwap();
+        }
         this.field.setField('fieldA', GRID, a.values);
         this.field.setField('fieldB', GRID, b.values);
         if (this.particles && a.u && a.v && b.u && b.v) this.particles.setWind(GRID, { u: a.u, v: a.v }, { u: b.u, v: b.v });
@@ -185,6 +194,8 @@ export class LiveController {
         this.shown = { a: ka, b: kb, alt: '' };
         this.current.a = a.values;
         this.current.b = b.values;
+        this.field.mix = mix;
+        if (swap) this.field.fadeTo(1, 260);
         this.onStatus('', false);
       } catch (e) {
         if (token === this.loadToken) this.onStatus(`Could not load GFS data: ${(e as Error).message}`, false);
@@ -213,28 +224,43 @@ export class LiveController {
     return v;
   }
 
-  /** Values of several variables at a point for the point-forecast card. */
-  async pointForecast(lon: number, lat: number) {
+  /**
+   * Fallback point forecast from the GFS fields (used when Open-Meteo is
+   * unreachable): conditions at the shown hour, temperatures every 3 hours.
+   */
+  async gfsPoint(lon: number, lat: number, elev: number): Promise<PointForecast> {
     const rel = (this.time - this.cycle!.time) / HOUR;
     const fh = Math.max(0, Math.round(rel));
     const vars: LiveVar[] = ['temp', 'feels', 'precip', 'cloud', 'wind', 'humidity', 'csnow'];
-    const [res, pe] = await Promise.all([Promise.all(vars.map((v) => this.get(v, fh).catch(() => null))), pointElevation(lon, lat)]);
-    const elev = pe ?? demAt(this.dem, lon, lat);
-    const out: Partial<Record<LiveVar, number>> = {};
+    const res = await Promise.all(vars.map((v) => this.get(v, fh).catch(() => null)));
+    const now: Partial<Record<LiveVar, number>> = {};
     vars.forEach((v, i) => {
       const r = res[i];
-      if (!r) return;
-      out[v] = this.sample(lon, lat, r.values, r.values, 0, v === 'temp' || v === 'feels', elev);
+      if (r) now[v] = this.sample(lon, lat, r.values, r.values, 0, v === 'temp' || v === 'feels', elev);
     });
-    // 24 h temperature trend for a sparkline
-    const trend: { t: number; v: number }[] = [];
-    const hours = [] as number[];
-    for (let k = 0; k <= 24; k += 3) if (fh + k <= 120) hours.push(fh + k);
-    const tr = await Promise.all(hours.map((f) => this.get('temp', f).catch(() => null)));
+    const t0 = this.cycle!.time + fh * HOUR;
+    const hours: Hour[] = [
+      {
+        t: t0,
+        temp: now.temp ?? NaN,
+        feels: now.feels,
+        code: codeFromFields(now.cloud ?? 0, now.precip ?? 0, (now.csnow ?? 0) > 0.5),
+        isDay: isDaytime(lon, lat, t0),
+        precip: now.precip,
+        cloud: now.cloud,
+        humidity: now.humidity,
+        wind: now.wind,
+      },
+    ];
+    const later: number[] = [];
+    for (let k = 3; k <= 24; k += 3) if (fh + k <= 120) later.push(fh + k);
+    const tr = await Promise.all(later.map((f) => this.get('temp', f).catch(() => null)));
     tr.forEach((r, i) => {
-      if (r) trend.push({ t: this.cycle!.time + hours[i] * HOUR, v: this.sample(lon, lat, r.values, r.values, 0, true, elev) });
+      if (!r) return;
+      const t = this.cycle!.time + later[i] * HOUR;
+      hours.push({ t, temp: this.sample(lon, lat, r.values, r.values, 0, true, elev), code: -1, isDay: isDaytime(lon, lat, t) });
     });
-    return { values: out, trend, time: this.cycle!.time + fh * HOUR, elev };
+    return { source: 'NOAA GFS', hours, daily: [] };
   }
 
   // ---------- city labels ----------

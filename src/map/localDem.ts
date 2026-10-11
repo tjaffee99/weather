@@ -134,3 +134,28 @@ export class LocalDem {
     this.onUpdate({ width: W, height: H, data, extent: [x0 / n, y0 / n, (x1 + 1) / n, (y1 + 1) / n] });
   }
 }
+
+/**
+ * `landdem://{z}/{x}/{y}` — terrarium tiles with the sea floor flattened to 0 m,
+ * so the hillshade only shades land.
+ */
+export async function landDemTile(url: string): Promise<ArrayBuffer> {
+  const m = /landdem:\/\/(\d+)\/(-?\d+)\/(\d+)/.exec(url);
+  if (!m) throw new Error(`bad tile url ${url}`);
+  const t = await tile(+m[1], +m[2], +m[3]);
+  if (!t) throw new Error('tile unavailable');
+  const img = new ImageData(256, 256);
+  const px = img.data;
+  for (let i = 0; i < t.length; i++) {
+    const v = t[i] + 32768; // terrarium: (R*256 + G + B/256) - 32768
+    const r = Math.floor(v / 256);
+    const g = Math.floor(v) - r * 256;
+    px[i * 4] = r;
+    px[i * 4 + 1] = g;
+    px[i * 4 + 2] = Math.floor((v - Math.floor(v)) * 256);
+    px[i * 4 + 3] = 255;
+  }
+  const cv = new OffscreenCanvas(256, 256);
+  cv.getContext('2d')!.putImageData(img, 0, 0);
+  return (await cv.convertToBlob({ type: 'image/png' })).arrayBuffer();
+}

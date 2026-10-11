@@ -30,7 +30,7 @@ uniform float u_mix;
 uniform vec4 u_grid;     // lon0, lat0, dx, dy
 uniform vec2 u_gridSize;
 uniform vec4 u_view;     // mercator x0, y0, x1, y1 of the viewport
-uniform float u_speed;   // mercator units per (m/s) per frame
+uniform float u_speed;   // mercator units per (m/s) for this frame's time step
 uniform float u_seed;
 uniform float u_drop;
 const float PI = 3.141592653589793;
@@ -49,7 +49,7 @@ void main() {
   float age = s.z + 1.0;
   vec2 seed = (v_uv + u_seed) * 13.7;
   bool outside = p.x < u_view.x || p.x > u_view.z || p.y < u_view.y || p.y > u_view.w;
-  float drop = u_drop + length(w) * 0.0004;
+  float drop = u_drop * (1.0 + length(w) * 0.08);
   if (outside || rand(seed) < drop || s.w < 0.5) {
     p = u_view.xy + vec2(rand(seed + 1.3), rand(seed + 2.1)) * (u_view.zw - u_view.xy);
     age = 0.0;
@@ -98,7 +98,13 @@ in vec2 v_uv;
 out vec4 color;
 uniform sampler2D u_tex;
 uniform float u_fade;
-void main() { color = texture(u_tex, v_uv) * u_fade; }`;
+// floor() guarantees 8-bit trails decay to zero instead of leaving ghosts
+void main() { color = floor(texture(u_tex, v_uv) * 255.0 * u_fade) / 255.0; }`;
+
+/** screen pixels per second for 1 m/s of wind */
+const PX_PER_MPS = 1.9;
+/** fraction of trail brightness left after one second */
+const TRAIL_PER_SECOND = 0.22;
 
 export class WindParticles implements CustomLayerInterface {
   id: string;
@@ -126,6 +132,7 @@ export class WindParticles implements CustomLayerInterface {
   private needsReset = true;
   private frame = 0;
   private raf = 0;
+  private lastT = 0;
 
   constructor(id: string) {
     this.id = id;
@@ -290,6 +297,7 @@ export class WindParticles implements CustomLayerInterface {
     g.disable(g.SCISSOR_TEST);
     g.colorMask(true, true, true, true);
     if (this.needsReset) {
+      this.lastT = 0;
       for (const fb of this.trailFb) {
         g.bindFramebuffer(g.FRAMEBUFFER, fb);
         g.clearColor(0, 0, 0, 0);
@@ -304,7 +312,11 @@ export class WindParticles implements CustomLayerInterface {
     }
     const grid = this.grid!;
     const zoom = this.map!.getZoom();
-    const worldPx = 512 * 2 ** zoom * (window.devicePixelRatio || 1);
+    const dpr = window.devicePixelRatio || 1;
+    const worldPx = 512 * 2 ** zoom * dpr;
+    const now = performance.now();
+    const dt = Math.min(0.1, Math.max(0.001, (now - (this.lastT || now - 33)) / 1000));
+    this.lastT = now;
     // 1. update
     const up = this.progs.update;
     g.useProgram(up.p);
@@ -324,9 +336,9 @@ export class WindParticles implements CustomLayerInterface {
     g.uniform4f(up.u.u_grid, grid.lon0, grid.lat0, grid.dx, grid.dy);
     g.uniform2f(up.u.u_gridSize, grid.nx, grid.ny);
     g.uniform4f(up.u.u_view, ...view);
-    g.uniform1f(up.u.u_speed, (0.22 * (window.devicePixelRatio || 1)) / worldPx);
+    g.uniform1f(up.u.u_speed, (PX_PER_MPS * dt * dpr) / worldPx);
     g.uniform1f(up.u.u_seed, Math.random());
-    g.uniform1f(up.u.u_drop, 0.004);
+    g.uniform1f(up.u.u_drop, 0.12 * dt);
     g.bindVertexArray(this.quadVao!);
     g.drawArrays(g.TRIANGLES, 0, 6);
     [this.state[0], this.state[1]] = [this.state[1], this.state[0]];
@@ -340,7 +352,7 @@ export class WindParticles implements CustomLayerInterface {
     g.activeTexture(g.TEXTURE0);
     g.bindTexture(g.TEXTURE_2D, this.trail[0]);
     g.uniform1i(fade.u.u_tex, 0);
-    g.uniform1f(fade.u.u_fade, 0.9);
+    g.uniform1f(fade.u.u_fade, Math.pow(TRAIL_PER_SECOND, dt));
     g.drawArrays(g.TRIANGLES, 0, 6);
     const dr = this.progs.draw;
     g.useProgram(dr.p);

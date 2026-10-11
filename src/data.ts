@@ -88,18 +88,17 @@ export async function loadCities(base: string): Promise<City[]> {
   }));
 }
 
+/** Closest city by straight-line distance (no preference for big cities). */
 export function nearestCity(cities: City[], lon: number, lat: number, maxKm = 40): City | null {
   let best: City | null = null;
-  let bd = Infinity;
+  let bd = maxKm;
   const cl = Math.cos((lat * Math.PI) / 180);
   for (const c of cities) {
     let dl = Math.abs(c.lon - lon);
     if (dl > 180) dl = 360 - dl;
     const d = Math.hypot((c.lat - lat) * 111, dl * 111 * cl);
-    // prefer bigger places when nearly as close
-    const score = d - Math.log10(c.pop + 10) * 2;
-    if (d < maxKm && score < bd) {
-      bd = score;
+    if (d < bd) {
+      bd = d;
       best = c;
     }
   }

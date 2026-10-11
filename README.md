@@ -66,6 +66,7 @@ Live at **https://weather.theojaffee.net** (`public/CNAME`; DNS: `weather` CNAME
 
 - Forecast: NOAA Global Forecast System (public domain), via the NOAA Open Data Dissemination program on AWS
 - Climate: Copernicus Climate Change Service ERA5 reanalysis (Hersbach et al. 2020), via Google's ARCO-ERA5
-- Basemap: OpenFreeMap / OpenMapTiles / © OpenStreetMap contributors
+- Point forecasts in the location card: Open-Meteo (CC BY 4.0); place names and boundaries: OpenStreetMap Nominatim
+- Basemap: OpenFreeMap / OpenMapTiles / © OpenStreetMap contributors; low-zoom coastlines: Natural Earth
 - Terrain: AWS Terrain Tiles (Mapzen terrarium)
 - Cities: Natural Earth (public domain)

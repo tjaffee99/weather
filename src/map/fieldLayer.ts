@@ -150,7 +150,7 @@ void main() {
     alpha = smoothstep(0.04, 0.35, ev.y);
     if (u_cut > 0.0) {
       float keep = smoothstep(u_cut - 0.012, u_cut, v);
-      col = mix(vec4(0.09, 0.11, 0.17, 0.85), col, keep);
+      col = mix(vec4(0.86, 0.86, 0.84, 0.55), col, keep);
     }
   }
   float a = col.a * alpha * u_opacity;
@@ -210,6 +210,10 @@ export class FieldLayer implements CustomLayerInterface {
   opacity = 1;
   /** climate mode: normalised value below which results are dimmed (0 = off) */
   cut = 0;
+  /** animated multiplier on top of `opacity` for cross-fades */
+  fade = 1;
+  private fadeRaf = 0;
+  private fadeDone?: () => void;
   private paletteDomain: [number, number] = [0, 1];
   private paletteLog = false;
   private hasA = false;
@@ -377,6 +381,34 @@ export class FieldLayer implements CustomLayerInterface {
     this.map?.triggerRepaint();
   }
 
+  /** Animate the fade multiplier; resolves when finished (or superseded). */
+  fadeTo(target: number, ms = 220): Promise<void> {
+    cancelAnimationFrame(this.fadeRaf);
+    this.fadeDone?.();
+    const from = this.fade;
+    if (Math.abs(from - target) < 1e-3 || ms <= 0) {
+      this.fade = target;
+      this.repaint();
+      return Promise.resolve();
+    }
+    const t0 = performance.now();
+    return new Promise((resolve) => {
+      this.fadeDone = resolve;
+      const step = (now: number) => {
+        const k = Math.min(1, (now - t0) / ms);
+        const e = k * k * (3 - 2 * k);
+        this.fade = from + (target - from) * e;
+        this.repaint();
+        if (k < 1) this.fadeRaf = requestAnimationFrame(step);
+        else {
+          this.fadeDone = undefined;
+          resolve();
+        }
+      };
+      this.fadeRaf = requestAnimationFrame(step);
+    });
+  }
+
   // ---------- rendering ----------
   private program(sd: CustomRenderMethodInput['shaderData']): Program {
     let p = this.programs.get(sd.variantName);
@@ -403,7 +435,7 @@ export class FieldLayer implements CustomLayerInterface {
   }
 
   render(_gl: WebGLRenderingContext | WebGL2RenderingContext, args: CustomRenderMethodInput) {
-    if (!this.ready || this.opacity <= 0) return;
+    if (!this.ready || this.opacity * this.fade <= 0.001) return;
     const gl = this.gl!;
     const p = this.program(args.shaderData);
     gl.useProgram(p.prog);
@@ -443,7 +475,7 @@ export class FieldLayer implements CustomLayerInterface {
     gl.uniform1i(p.u.u_log, this.paletteLog ? 1 : 0);
     gl.uniform1f(p.u.u_lapse, this.lapse);
     gl.uniform1f(p.u.u_useAlt, this.useAlt);
-    gl.uniform1f(p.u.u_opacity, this.opacity);
+    gl.uniform1f(p.u.u_opacity, this.opacity * this.fade);
     gl.uniform1f(p.u.u_cut, this.mode === 1 ? this.cut : 0);
 
     if (!this.vao) {

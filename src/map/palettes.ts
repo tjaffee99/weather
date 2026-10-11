@@ -115,18 +115,18 @@ export const HUMIDITY: Palette = {
   ],
 };
 
-/** Climate explorer: days per year / probability (normalised 0..1). */
+/** Climate explorer: days per year / probability (normalised 0..1). Light-map friendly. */
 export const SCORE: Palette = {
   stops: [
-    [0, '#1d1640', 0.55],
-    [0.02, '#2a1f63', 0.8],
-    [0.12, '#3b3f9a'],
-    [0.25, '#2f6fb7'],
-    [0.4, '#2aa1b8'],
-    [0.55, '#34c28f'],
-    [0.7, '#93d95a'],
-    [0.85, '#f1dd4b'],
-    [1, '#fff3a8'],
+    [0, '#fbf6d9', 0],
+    [0.015, '#f4f3bf', 0.5],
+    [0.08, '#e3f1b0', 0.78],
+    [0.2, '#b4e0b0', 0.88],
+    [0.35, '#74c8b8', 0.94],
+    [0.5, '#3eaec4', 1],
+    [0.65, '#2489bf', 1],
+    [0.8, '#2a61a8', 1],
+    [1, '#1c3a85', 1],
   ],
 };
 
