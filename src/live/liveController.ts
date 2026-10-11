@@ -29,8 +29,8 @@ export interface LayerDef {
 }
 
 export const LIVE_LAYERS: LayerDef[] = [
-  { id: 'temp', label: 'Temperature', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90, 115] },
-  { id: 'feels', label: 'Feels like', icon: '🧍', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90, 115] },
+  { id: 'temp', label: 'Temperature', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90] },
+  { id: 'feels', label: 'Feels like', icon: '🧍', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90] },
   { id: 'precip', label: 'Precipitation', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25], legendImperial: [0.01, 0.05, 0.2, 1] },
   { id: 'cloud', label: 'Clouds', icon: '☁', palette: CLOUD, q: 'percent', lapse: false, legend: [0, 50, 100] },
   { id: 'wind', label: 'Wind', icon: '🌬', palette: WIND, q: 'speed', lapse: false, legend: [0, 20, 50, 100], legendImperial: [0, 10, 30, 60] },
