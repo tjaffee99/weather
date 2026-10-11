@@ -540,6 +540,14 @@ button {
   position: relative;
   height: 26px;
   margin: 2px 2px 0;
+  cursor: pointer;
+  /* horizontal drags belong to the slider, vertical ones still scroll the panel */
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.rs.dragging {
+  cursor: grabbing;
 }
 .rs-track,
 .rs-fill {
@@ -569,7 +577,7 @@ button {
 }
 .rs input::-webkit-slider-thumb {
   -webkit-appearance: none;
-  pointer-events: auto;
+  pointer-events: none;
   width: 18px;
   height: 18px;
   border-radius: 50%;
@@ -578,7 +586,7 @@ button {
   cursor: grab;
 }
 .rs input::-moz-range-thumb {
-  pointer-events: auto;
+  pointer-events: none;
   width: 18px;
   height: 18px;
   border: 0;
