@@ -66,11 +66,10 @@ export const SNOWFALL: Palette = {
 export const CLOUD: Palette = {
   stops: [
     [0, '#ffffff', 0],
-    [15, '#ffffff', 0.02],
-    [40, '#e9eef5', 0.3],
-    [70, '#dde4ee', 0.62],
-    [90, '#d4dbe6', 0.82],
-    [100, '#cfd6e2', 0.9],
+    [20, '#ffffff', 0.03],
+    [50, '#eef2f8', 0.26],
+    [80, '#e2e8f1', 0.5],
+    [100, '#d8dfea', 0.66],
   ],
 };
 

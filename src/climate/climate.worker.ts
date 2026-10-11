@@ -101,6 +101,8 @@ function codeRange(c: Criterion): [number, number] {
       const binHi = k === e.length ? Infinity : e[k];
       if (binHi > c.hi + 1e-9) hi = k - 1;
     }
+    // "≤ 0" means "none at all", i.e. the first bin
+    if (c.hi < e[0]) hi = 0;
     return [lo, hi];
   }
   const s = vm.scale!, o = vm.offset!;
