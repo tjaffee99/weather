@@ -1,0 +1,289 @@
+import maplibregl, { type Map as MlMap } from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import './styles.css';
+import { baseStyle, WEATHER_BEFORE } from './map/style';
+import { FieldLayer } from './map/fieldLayer';
+import { loadCities, loadDem, type City, type Dem } from './data';
+import { LiveController } from './live/liveController';
+import { LiveUI } from './live/liveUi';
+import { $, h, clear } from './ui/dom';
+import { units } from './units';
+import type { ClimateUI } from './climate/climateUi';
+
+const BASE = import.meta.env.BASE_URL;
+type Mode = 'live' | 'days' | 'date';
+
+const els = {
+  panel: $('#panel'),
+  bottom: $('#bottombar'),
+  legend: $('#legend'),
+  card: $('#card'),
+};
+
+// ---------- status toast ----------
+const statusEl = $('#status');
+function setStatus(msg: string, busy = true, error = false) {
+  statusEl.classList.toggle('hidden', !msg);
+  statusEl.classList.toggle('error', error);
+  $('#statusText').textContent = msg;
+  if (!busy) statusEl.querySelector('.spinner')?.classList.add('hidden');
+  else statusEl.querySelector('.spinner')?.classList.remove('hidden');
+}
+
+// ---------- map ----------
+const map: MlMap = new maplibregl.Map({
+  container: 'map',
+  style: baseStyle(),
+  center: [0, 28],
+  zoom: Math.max(0.6, Math.log2(Math.max(320, window.innerWidth - (window.innerWidth > 760 ? 340 : 0)) / 512) + 0.15),
+  minZoom: 0,
+  maxZoom: 12,
+  hash: 'map',
+  attributionControl: false,
+  dragRotate: false,
+  pitchWithRotate: false,
+});
+map.touchZoomRotate.disableRotation();
+map.addControl(
+  new maplibregl.AttributionControl({
+    compact: true,
+    customAttribution:
+      'Forecast: <a href="https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast">NOAA GFS</a> · Climate: <a href="https://cds.climate.copernicus.eu/">Copernicus ERA5</a> via <a href="https://github.com/google-research/arco-era5">ARCO-ERA5</a> · <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://www.naturalearthdata.com/">Natural Earth</a>',
+  }),
+  'bottom-right',
+);
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
+
+const field = new FieldLayer('weather');
+let marker: maplibregl.Marker | null = null;
+let mode: Mode = 'live';
+let live: LiveController;
+let liveUi: LiveUI;
+let climateUi: ClimateUI | null = null;
+let liveReady: Promise<void> = Promise.resolve();
+let cities: City[] = [];
+let dem: Dem;
+
+function closeCard() {
+  els.card.classList.add('hidden');
+  clear(els.card);
+  marker?.remove();
+  marker = null;
+}
+
+function cityLayer() {
+  map.addSource('cities', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({
+    id: 'city-labels',
+    type: 'symbol',
+    source: 'cities',
+    filter: ['<=', ['get', 'minzoom'], ['+', ['zoom'], 2.4]],
+    layout: {
+      'symbol-sort-key': ['get', 'rank'],
+      'text-field': [
+        'case',
+        ['!=', ['get', 'label'], ''],
+        ['format', ['get', 'label'], { 'font-scale': 1.18, 'text-font': ['literal', ['Noto Sans Bold']] }, '\n', {}, ['get', 'name'], { 'font-scale': 0.8 }],
+        ['get', 'name'],
+      ],
+      'text-font': ['Noto Sans Regular'],
+      'text-size': ['interpolate', ['linear'], ['zoom'], 1, 11, 5, 13, 9, 15],
+      'text-line-height': 1.05,
+      'text-padding': 6,
+      'text-max-width': 8,
+    },
+    paint: {
+      'text-color': '#ffffff',
+      'text-halo-color': 'rgba(10,14,24,0.6)',
+      'text-halo-width': 1.4,
+      'text-halo-blur': 0.6,
+    },
+  });
+}
+
+/** Water opacity: translucent over live fields, opaque in climate modes to clip results to land. */
+function setWaterForMode(m: Mode) {
+  if (!map.getLayer('water')) return;
+  // < 1 keeps the fill in MapLibre's translucent pass so it draws after (above) the custom layer
+  map.setPaintProperty('water', 'fill-opacity', m === 'live' ? 0.22 : 0.995);
+  map.setPaintProperty('water', 'fill-color', m === 'live' ? '#0a0f19' : '#101828');
+}
+
+async function setMode(m: Mode) {
+  if (m === mode && (m === 'live' ? live?.active : climateUi)) return;
+  const prev = mode;
+  mode = m;
+  document.querySelectorAll<HTMLButtonElement>('#modes button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.mode === m)));
+  closeCard();
+  if (prev === 'live' && m !== 'live') {
+    live.deactivate();
+    liveUi.exit();
+  }
+  if (prev !== 'live' && m === 'live') climateUi?.exit();
+  setWaterForMode(m);
+  if (m === 'live') {
+    els.bottom.classList.remove('hidden');
+    await liveReady;
+    if (mode !== 'live') return;
+    live.activate();
+    liveUi.enter();
+    live.updateCities();
+  } else {
+    els.bottom.classList.toggle('hidden', m === 'days');
+    if (!climateUi) {
+      clear(els.panel);
+      els.panel.append(h('h2', {}, 'Climate'), h('p', { class: 'hint' }, 'Loading climate explorer…'));
+      const mod = await import('./climate/climateUi');
+      climateUi = new mod.ClimateUI(map, field, els, cities, dem, setStatus, closeCard, BASE);
+    }
+    if (mode !== m) return;
+    await climateUi.enter(m);
+  }
+  updateUrlMode();
+}
+
+function updateUrlMode() {
+  const u = new URL(location.href);
+  if (mode === 'live') u.searchParams.delete('mode');
+  else u.searchParams.set('mode', mode);
+  history.replaceState(null, '', u);
+}
+
+function placeMarker(lon: number, lat: number) {
+  marker?.remove();
+  marker = new maplibregl.Marker({ element: h('div', { class: 'pin' }) }).setLngLat([lon, lat]).addTo(map);
+}
+
+function openAt(lon: number, lat: number) {
+  placeMarker(lon, lat);
+  if (mode === 'live') liveUi.showCard(lon, lat);
+  else climateUi?.showCard(lon, lat);
+}
+
+// ---------- UI wiring ----------
+document.querySelectorAll<HTMLButtonElement>('#modes button').forEach((b) =>
+  b.addEventListener('click', () => setMode(b.dataset.mode as Mode)),
+);
+
+const unitsBtn = $('#units');
+const paintUnits = () => (unitsBtn.textContent = units.imperial ? '°F' : '°C');
+paintUnits();
+unitsBtn.addEventListener('click', () => units.set(units.imperial ? 'metric' : 'imperial'));
+units.onChange(() => {
+  paintUnits();
+  if (mode === 'live') liveUi?.refreshUnits();
+  else climateUi?.refreshUnits();
+  if (marker) {
+    const ll = marker.getLngLat();
+    openAt(ll.lng, ll.lat);
+  }
+});
+
+const globeBtn = $('#globe');
+globeBtn.addEventListener('click', () => {
+  const globe = map.getProjection()?.type !== 'globe';
+  map.setProjection({ type: globe ? 'globe' : 'mercator' });
+  globeBtn.setAttribute('aria-pressed', String(globe));
+});
+
+$('#panelToggle').addEventListener('click', () => els.panel.classList.toggle('open'));
+
+// search
+const searchInput = $<HTMLInputElement>('#search');
+const results = $('#searchResults');
+let sel = 0;
+let matches: City[] = [];
+const norm = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+function renderResults() {
+  clear(results);
+  matches.forEach((c, i) =>
+    results.append(
+      h('li', { role: 'option', 'aria-selected': String(i === sel), onmousedown: (e: Event) => (e.preventDefault(), choose(c)) }, c.name, h('small', {}, c.country)),
+    ),
+  );
+}
+function choose(c: City) {
+  searchInput.value = c.name;
+  matches = [];
+  renderResults();
+  searchInput.blur();
+  map.flyTo({ center: [c.lon, c.lat], zoom: Math.max(map.getZoom(), 6.5), speed: 1.6 });
+  openAt(c.lon, c.lat);
+}
+searchInput.addEventListener('input', () => {
+  const q = norm(searchInput.value.trim());
+  sel = 0;
+  if (q.length < 2) matches = [];
+  else {
+    const starts = cities.filter((c) => norm(c.name).startsWith(q));
+    const contains = cities.filter((c) => !norm(c.name).startsWith(q) && norm(`${c.name} ${c.country}`).includes(q));
+    matches = [...starts, ...contains].slice(0, 8);
+  }
+  renderResults();
+});
+searchInput.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowDown') sel = Math.min(sel + 1, matches.length - 1);
+  else if (e.key === 'ArrowUp') sel = Math.max(sel - 1, 0);
+  else if (e.key === 'Enter' && matches[sel]) choose(matches[sel]);
+  else if (e.key === 'Escape') matches = [];
+  else return;
+  e.preventDefault();
+  renderResults();
+});
+searchInput.addEventListener('blur', () => setTimeout(() => ((matches = []), renderResults()), 150));
+document.addEventListener('keydown', (e) => {
+  if (e.key === '/' && document.activeElement !== searchInput) {
+    e.preventDefault();
+    searchInput.focus();
+  }
+  if (e.key === 'Escape') closeCard();
+});
+
+map.on('click', (e) => openAt(e.lngLat.lng, e.lngLat.lat));
+
+// keep the visible map centred in the area not covered by the side panel
+function applyPadding() {
+  const wide = window.innerWidth > 760;
+  map.setPadding({ left: wide ? 340 : 0, top: 0, right: 0, bottom: 0 });
+}
+applyPadding();
+window.addEventListener('resize', applyPadding);
+
+// ---------- boot ----------
+map.on('load', async () => {
+  document.querySelector('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
+  try {
+    map.addLayer(field, WEATHER_BEFORE);
+    cityLayer();
+    setStatus('Loading terrain…');
+    const [d, cs] = await Promise.all([loadDem(BASE), loadCities(BASE)]);
+    cities = cs;
+    dem = d;
+    field.setDem(dem.w, dem.h, dem.q);
+    live = new LiveController(map, field, dem, cities);
+    live.onStatus = (msg, busy) => {
+      if (mode === 'live') setStatus(msg, busy, !busy && !!msg);
+    };
+    liveUi = new LiveUI(live, els, cities, closeCard);
+    const want = (new URL(location.href).searchParams.get('mode') as Mode) || 'live';
+    liveReady = live.init().catch((e) => {
+      console.warn(e);
+      if (mode === 'live') setStatus(`Live data unavailable: ${(e as Error).message}`, false, true);
+    });
+    if (want === 'live' || !['days', 'date'].includes(want)) {
+      liveUi.enter();
+      await liveReady;
+      live.activate();
+      liveUi.enter();
+    } else {
+      mode = 'live';
+      await setMode(want);
+    }
+  } catch (e) {
+    console.error(e);
+    setStatus(`Error: ${(e as Error).message}`, false, true);
+  }
+});
+
+// expose for debugging / tests
+(window as unknown as { __wa: unknown }).__wa = { map, field, get live() { return live; }, get climate() { return climateUi; } };
