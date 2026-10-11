@@ -115,18 +115,23 @@ export const HUMIDITY: Palette = {
   ],
 };
 
-/** Climate explorer: days per year / probability (normalised 0..1). Light-map friendly. */
+/**
+ * Climate finder: days per year / probability (normalised 0..1). Saturated
+ * from the first matching day so results read clearly on the light basemap:
+ * warm yellow (rare) -> green -> teal -> blue -> violet (most days).
+ */
 export const SCORE: Palette = {
   stops: [
-    [0, '#fbf6d9', 0],
-    [0.015, '#f4f3bf', 0.5],
-    [0.08, '#e3f1b0', 0.78],
-    [0.2, '#b4e0b0', 0.88],
-    [0.35, '#74c8b8', 0.94],
-    [0.5, '#3eaec4', 1],
-    [0.65, '#2489bf', 1],
-    [0.8, '#2a61a8', 1],
-    [1, '#1c3a85', 1],
+    [0, '#ffe066', 0],
+    [0.02, '#ffdc4a', 0.3],
+    [0.07, '#ffcc1f', 0.75],
+    [0.15, '#c2d52f', 0.95],
+    [0.28, '#4cbf4c', 1],
+    [0.42, '#0fae8b', 1],
+    [0.56, '#0a93c4', 1],
+    [0.7, '#1f6fe0', 1],
+    [0.85, '#3a4bd8', 1],
+    [1, '#5a2bb8', 1],
   ],
 };
 

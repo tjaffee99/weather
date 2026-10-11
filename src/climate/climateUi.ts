@@ -117,7 +117,7 @@ export class ClimateUI {
     this.field.mode = 1;
     this.field.lapse = 0;
     this.field.useAlt = 0;
-    this.field.opacity = 0.92;
+    this.field.opacity = 1;
     this.field.setPalette(SCORE);
     this.lastMode = null;
     this.renderPanel();
@@ -205,36 +205,33 @@ export class ClimateUI {
     const scroll = p.scrollTop;
     clear(p);
     const year = this.mode === 'days';
-    p.append(
-      h('h2', {}, 'Find your climate'),
-      h(
-        'p',
-        { class: 'hint' },
-        year
-          ? 'Days per year that match all of your conditions, from 25 years of weather history (2001–2025). Pick a date below to see the chance on a given day.'
-          : `Chance that a day around ${doyLabel(this.doy, true)} matches all of your conditions (2001–2025).`,
-      ),
+    // what the colours mean
+    const view = h(
+      'div',
+      { class: 'seg view-seg', role: 'tablist', 'aria-label': 'Show' },
+      h('button', { role: 'tab', 'aria-selected': String(year), onclick: () => this.setWhen('days') }, 'Days per year'),
+      h('button', { role: 'tab', 'aria-selected': String(!year), onclick: () => this.setWhen('date') }, 'Chance by date'),
     );
     const presets = h('div', { class: 'presets' });
     for (const pr of PRESETS)
       presets.append(
         h('button', { class: 'chip', 'aria-pressed': String(this.preset === pr.id), onclick: () => this.setState(pr.state, pr.id) }, `${pr.icon} ${pr.label}`),
       );
-    p.append(presets);
-
     const list = h('div', { class: 'conds' });
     const active = CRITERIA.filter((d) => d.v in this.state);
     for (const def of active) list.append(this.condRow(def));
-    if (!active.length) list.append(h('div', { class: 'empty' }, 'No conditions yet — every day counts. Add one below.'));
-    p.append(h('div', { class: 'section-title' }, 'Your conditions'), list, this.addMenu());
-    p.append(this.cutRow());
-    p.append(
+    if (!active.length) list.append(h('div', { class: 'empty' }, 'No conditions: every day counts.'));
+    const about = h(
+      'details',
+      { class: 'about' },
+      h('summary', {}, 'About the data'),
       h(
-        'div',
-        { class: 'run-info' },
-        'Mountains are adjusted to local elevation (−6.5 °C per km). Daily values use local solar time. Tap the map for monthly details.',
+        'p',
+        {},
+        'ERA5 reanalysis, 2001–2025: one real day per calendar day at every 1° land cell, in local solar time. Temperatures are adjusted to the local terrain (−6.5 °C per km). Tap the map for monthly details.',
       ),
     );
+    p.append(view, presets, list, this.addMenu(), this.cutRow(), about);
     p.scrollTop = scroll;
   }
 
@@ -316,7 +313,7 @@ export class ClimateUI {
   private cutRow(): HTMLElement {
     const days = this.mode === 'days';
     const v = days ? this.cut.days : this.cut.date;
-    const fmtCut = (x: number) => (x <= 0 ? 'off' : days ? `≥ ${x} days/yr` : `≥ ${Math.round(x * 100)}%`);
+    const fmtCut = (x: number) => (x <= 0 ? 'off' : days ? `${x} days/yr` : `${Math.round(x * 100)}%`);
     const val = h('span', { class: 'val' }, fmtCut(v));
     const input = h('input', {
       type: 'range',
@@ -337,7 +334,7 @@ export class ClimateUI {
     return h(
       'div',
       { class: 'cut' },
-      h('div', { class: 'cond-head' }, h('span', { class: 'cond-name' }, days ? 'Only highlight places with at least' : 'Only highlight a chance of at least'), val),
+      h('div', { class: 'cond-head' }, h('span', { class: 'cond-name' }, 'Highlight at least'), val),
       h('div', { class: 'cut-range' }, input),
     );
   }
@@ -354,12 +351,7 @@ export class ClimateUI {
   private cutTimer = 0;
 
   private defaultRange(def: CritDef): [number, number] {
-    const I = Infinity;
-    const d: Partial<Record<CritVar, [number, number]>> = {
-      feels: [18, 28], tmax: [18, 28], tmin: [10, 22], dew: [-I, 16], cloud: [-I, 50], precip: [-I, 1],
-      wind: [-I, 30], snow: [10, I], sst: [22, I], daylight: [10, I],
-    };
-    return d[def.v] ?? [-I, I];
+    return [...def.def] as [number, number];
   }
 
   private makeSlider(def: CritDef, cur: [number, number], onLabel: (r: [number, number]) => void) {
@@ -410,22 +402,27 @@ export class ClimateUI {
   private renderBottom() {
     const b = this.els.bottom;
     clear(b);
+    this.dateRange = undefined;
+    this.dateLabel = undefined;
+    if (this.mode !== 'date') {
+      b.classList.add('hidden');
+      return;
+    }
     b.classList.remove('hidden');
-    const year = this.mode === 'days';
     this.dateRange = h('input', {
       type: 'range',
-      class: `single-range${year ? ' idle' : ''}`,
+      class: 'single-range',
       min: 0,
       max: 364,
       step: 1,
       value: this.doy,
-      'aria-label': 'Day of year',
+      'aria-label': 'Date',
       oninput: () => {
         this.stopPlay();
         this.setDoy(+this.dateRange!.value);
       },
     });
-    this.dateLabel = h('span', { class: 'timeline-label' }, year ? 'All year' : doyLabel(this.doy, true));
+    this.dateLabel = h('span', { class: 'timeline-label' }, doyLabel(this.doy, true));
     const ticks = h('div', { class: 'ticks' });
     MONTHS.forEach((m, i) => {
       const s = h('span', {}, m);
@@ -433,18 +430,12 @@ export class ClimateUI {
       ticks.append(s);
     });
     const play = h('button', { class: 'play', 'aria-label': 'Play through the year', onclick: () => (this.playing ? this.stopPlay() : this.play()) }, '▶');
-    const seg = h(
-      'div',
-      { class: 'seg', role: 'tablist', 'aria-label': 'When' },
-      h('button', { role: 'tab', 'aria-selected': String(year), onclick: () => this.setWhen('days') }, 'All year'),
-      h('button', { role: 'tab', 'aria-selected': String(!year), onclick: () => this.setWhen('date') }, 'On a date'),
-    );
     b.append(
       play,
       h(
         'div',
         { class: 'timeline' },
-        h('div', { class: 'timeline-top' }, this.dateLabel, h('span', { class: 'timeline-sub' }, year ? 'days per year' : `± ${HALF_WINDOW} days`), seg),
+        h('div', { class: 'timeline-top' }, this.dateLabel, h('span', { class: 'timeline-sub' }, 'chance of a matching day, ± 10 days')),
         this.dateRange,
         ticks,
       ),
@@ -469,8 +460,6 @@ export class ClimateUI {
     }
     if (this.dateLabel) this.dateLabel.textContent = doyLabel(this.doy, true);
     if (this.dateRange) this.dateRange.value = String(this.doy);
-    const hint = this.els.panel.querySelector('.hint');
-    if (hint) hint.textContent = `Chance that a day around ${doyLabel(this.doy, true)} matches all of your conditions (2001–2025).`;
     this.requery();
   }
 

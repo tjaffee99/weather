@@ -120,6 +120,9 @@ function setWaterForMode(m: Mode) {
   // < 1 keeps the fill in MapLibre's translucent pass so it draws after (above) the custom layer
   map.setPaintProperty('water', 'fill-opacity', m === 'live' ? 0.18 : 0.995);
   map.setPaintProperty('water', 'fill-color', WATER);
+  // softer terrain highlights over climate results so their colours stay saturated
+  map.setPaintProperty('hillshade', 'hillshade-highlight-color', m === 'live' ? 'rgba(255,255,255,0.32)' : 'rgba(255,255,255,0.1)');
+  map.setPaintProperty('hillshade', 'hillshade-shadow-color', m === 'live' ? 'rgba(40,48,60,0.42)' : 'rgba(30,36,50,0.3)');
 }
 
 async function setMode(m: Mode) {
