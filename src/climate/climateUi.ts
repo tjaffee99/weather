@@ -19,6 +19,7 @@ import { renderLegend } from '../ui/legend';
 import { MONTHS, MONTH_START, coordLabel, doyLabel, timeLabel, todayDoy } from '../ui/format';
 import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
 import { CRITERIA, GROUPS, PRESETS, type CritDef, type CritState } from './criteria';
+import { blendTaps, levelOf } from './blend';
 import { DZ0, DZ_STEP, LEVELS, type ClimVar, type ClimateMeta, type CritVar, type Criterion, type DetailResult } from './types';
 
 type Els = { panel: HTMLElement; bottom: HTMLElement; legend: HTMLElement; card: HTMLElement };
@@ -401,7 +402,7 @@ export class ClimateUI {
   private applyCut() {
     const r = this.result;
     if (!r) return;
-    this.field.cut = r.mode === 'days' ? (this.cut.days > 0 ? Math.min(1, this.cut.days / r.scaleMax) : 0) : this.cut.date;
+    this.field.cut = r.mode === 'days' ? (this.cut.days > 0 ? this.cut.days / r.scaleMax : 0) : this.cut.date;
     this.field.repaint();
     this.renderLegendBox();
     clearTimeout(this.cutTimer);
@@ -687,37 +688,27 @@ export class ClimateUI {
     if (this.field.cut > 0) {
       const bar = this.els.legend.querySelector('.legend-bar') as HTMLElement;
       const mk = h('div', { class: 'legend-cut' });
-      mk.style.left = `${this.field.cut * 100}%`;
+      mk.style.left = `${Math.min(1, this.field.cut) * 100}%`;
       bar.append(mk);
     }
   }
 
-  /** Bilinear sample of the result (same logic as the shader, minus the cubic smoothing). */
+  /** Sample the result at a point, blending cells exactly like the shader (see blend.ts). */
   private sampleResult(lon: number, lat: number, elev?: number): number {
     const r = this.result, g = this.meta?.grid, et = this.cellElevTex;
     if (!r || !g || !et) return NaN;
-    const x = (lon - g.lon0) / g.dx, y = (g.lat0 - lat) / g.dy;
-    const x0 = Math.floor(x), y0 = Math.floor(y);
-    const fx = x - x0, fy = y - y0;
-    let ez = 0, ew = 0;
-    const taps: [number, number, number][] = [];
-    for (const [dx, dy, w] of [[0, 0, (1 - fx) * (1 - fy)], [1, 0, fx * (1 - fy)], [0, 1, (1 - fx) * fy], [1, 1, fx * fy]] as const) {
-      const yy = y0 + dy;
-      if (yy < 0 || yy >= g.ny) continue;
-      const xx = (((x0 + dx) % g.nx) + g.nx) % g.nx;
-      const p = yy * g.nx + xx;
-      if (!et[p * 2 + 1]) continue;
-      ez += et[p * 2] * w;
-      ew += w;
-      taps.push([p, w, 0]);
-    }
-    if (ew < 0.05) return NaN;
-    const lvl = Math.min(LEVELS - 1, Math.max(0, ((elev ?? demAt(this.dem, lon, lat)) - ez / ew - DZ0) / DZ_STEP));
-    const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
+    const z = elev ?? demAt(this.dem, lon, lat);
+    const { taps, cover } = blendTaps(g, (p) => (et[p * 2 + 1] ? et[p * 2] : undefined), lon, lat, z);
+    if (cover < 0.04) return NaN;
     const n = g.nx * g.ny;
-    let v = 0;
-    for (const [p, w] of taps) v += w * ((1 - f) * r.data[(l0 * n + p) * 2] + f * r.data[(l1 * n + p) * 2]);
-    return (v / ew) * (r.mode === 'days' ? r.scaleMax : 1);
+    let v = 0, sq = 0;
+    for (const t of taps) {
+      const lvl = levelOf(t.dz);
+      const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
+      v += t.q * ((1 - f) * r.data[(l0 * n + t.p) * 2] + f * r.data[(l1 * n + t.p) * 2]);
+      sq += t.q;
+    }
+    return (v / Math.max(sq, 1e-20)) * (r.mode === 'days' ? r.scaleMax : 1);
   }
 
   private formatScore(v: number) {
@@ -817,7 +808,7 @@ export class ClimateUI {
         h(
           'div',
           { class: 'note' },
-          `ERA5 grid cell at ${coordLabel(res.cellLon, res.cellLat)} (avg. ${res.cellElev} m); temperatures shifted ${res.shift >= 0 ? '+' : '−'}${Math.abs(units.imperial ? res.shift * 1.8 : res.shift).toFixed(1)}° for this spot's elevation. One sampled day per calendar day, drawn from 2001–2025.`,
+          `${res.cells > 1 ? `Blend of ${res.cells} nearby ERA5 grid cells, mainly the one at` : 'ERA5 grid cell at'} ${coordLabel(res.cellLon, res.cellLat)} (avg. ${res.cellElev} m); temperatures shifted ${res.shift >= 0 ? '+' : '−'}${Math.abs(units.imperial ? res.shift * 1.8 : res.shift).toFixed(1)}° for this spot's elevation. One sampled day per calendar day, drawn from 2001–2025.`,
         ),
       );
     };
@@ -970,10 +961,10 @@ function normalsTable(r: DetailResult): HTMLTableElement {
     ['Low', 'Average overnight low', (m) => (m.tmin === undefined ? undefined : fmt('temp', m.tmin))],
     ['Dew pt', 'Average daytime dew point (humidity)', (m) => (m.dew === undefined ? undefined : fmt('temp', m.dew))],
     ['Sun h', 'Average hours of sunshine per day', (m) => (m.sun === undefined ? undefined : m.sun.toFixed(1))],
-    ['Clear', 'Days with daytime cloud cover ≤ 25%', (m) => (m.sunnyDays === undefined ? undefined : String(m.sunnyDays))],
-    ['Rainy', 'Days with ≥ 1 mm of precipitation', (m) => (m.rainDays === undefined ? undefined : String(m.rainDays))],
+    ['Clear', 'Days with daytime cloud cover ≤ 25%', (m) => (m.sunnyDays === undefined ? undefined : String(Math.round(m.sunnyDays)))],
+    ['Rainy', 'Days with ≥ 1 mm of precipitation', (m) => (m.rainDays === undefined ? undefined : String(Math.round(m.rainDays)))],
     [`Precip ${unitLabel('precip')}`, 'Total precipitation in the month', (m) => (m.precip === undefined ? undefined : fmt('precip', m.precip, false))],
-    ['Snowy', 'Days with ≥ 1 cm of snow on the ground', (m) => (m.snowDays === undefined ? undefined : String(m.snowDays))],
+    ['Snowy', 'Days with ≥ 1 cm of snow on the ground', (m) => (m.snowDays === undefined ? undefined : String(Math.round(m.snowDays)))],
     [`Wind ${unitLabel('speed')}`, 'Average strongest daytime wind', (m) => (m.wind === undefined ? undefined : fmt('speed', m.wind, false))],
     ['Sea', 'Average nearby sea surface temperature', (m) => (m.sst === undefined ? undefined : fmt('temp', m.sst))],
   ];

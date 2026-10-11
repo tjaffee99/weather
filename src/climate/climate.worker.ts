@@ -10,6 +10,7 @@
 import { fetchBinary } from '../data';
 import { decodeVar, parseCells, checksum, type CellsInfo } from './codec';
 import { DZ0, DZ_STEP, LAPSE, LEVELS, type ClimVar, type ClimateMeta, type Criterion, type DetailResult, type MonthStats } from './types';
+import { blendTaps, levelOf } from './blend';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -227,7 +228,9 @@ function query(crit: Criterion[], mode: 'days' | 'date', doy: number, half: numb
   for (let l = 0; l < LEVELS; l++)
     for (let c = 0; c < ncells; c++) {
       const o = ((l * ny + cellRow[c]) * nx + cellCol[c]) * 2;
-      out[o] = Math.min(1, acc[l * ncells + c] / scaleMax);
+      // not clamped: the shader saturates colours above scaleMax, but labels
+      // and the highlight threshold need the real count
+      out[o] = acc[l * ncells + c] / scaleMax;
       out[o + 1] = 1;
     }
   // summary at sea-level-equivalent level for the UI
@@ -267,26 +270,103 @@ function decodeValue(v: ClimVar, code: number): number {
   return (e[code - 1] + e[code]) / 2;
 }
 
+/**
+ * Location card numbers. Blends the nearby cells with the same weights as
+ * the map (blend.ts), each cell's temperatures shifted to the point's
+ * elevation, so the card agrees with the map colour and city label.
+ */
 function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): DetailResult | null {
-  const c = nearestCell(lon, lat);
-  if (c < 0) return null;
-  const days = meta.days;
   const g = meta.grid;
-  const cellElev = cells.elev[c];
-  const shift = -LAPSE * (demElev - cellElev);
+  const elevAt = (p: number) => (cellIndex[p] < 0 ? undefined : cells.elev[cellIndex[p]]);
+  let taps = blendTaps(g, elevAt, lon, lat, demElev).taps;
+  if (!taps.length) {
+    // off the edge of the data (small islands): nearest cell within 2°
+    const c = nearestCell(lon, lat);
+    if (c < 0) return null;
+    taps = [{ p: cellRow[c] * g.nx + cellCol[c], q: 1, dz: levelShift(demElev - cells.elev[c]) }];
+  }
+  const qmax = Math.max(...taps.map((t) => t.q));
+  taps = taps.filter((t) => t.q > qmax * 1e-3);
+  const qsum = taps.reduce((s, t) => s + t.q, 0);
+  const main = taps.reduce((a, b) => (b.q > a.q ? b : a));
+  const days = meta.days;
   const p = prepare(crit);
   const match = new Float32Array(days);
-  for (let d = 0; d < days; d++) {
-    const i = c * days + d;
-    let ok = true;
-    for (const q of p.plain) if (q.arr[i] < q.lo || q.arr[i] > q.hi) ok = false;
-    if (ok && p.daylight) {
-      const h = daylight[cellRow[c] * days + d];
-      if (h < p.daylight[0] || h > p.daylight[1]) ok = false;
+  const loaded = (Object.keys(data) as ClimVar[]).filter((v) => data[v]);
+  const sums: Record<string, number>[] = Array.from({ length: 12 }, () => ({}));
+  const wsum: Record<string, number>[] = Array.from({ length: 12 }, () => ({}));
+  const add = (m: number, k: string, v: number | undefined, w: number) => {
+    if (v === undefined || !Number.isFinite(v)) return;
+    sums[m][k] = (sums[m][k] ?? 0) + v * w;
+    wsum[m][k] = (wsum[m][k] ?? 0) + w;
+  };
+
+  for (const t of taps) {
+    const c = cellIndex[t.p];
+    const w = t.q / qsum;
+    const shift = -LAPSE * t.dz;
+    // matches are interpolated between the two nearest elevation levels, like the map
+    const lvl = levelOf(t.dz);
+    const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
+    const m1 = new Float32Array(days);
+    for (let d = 0; d < days; d++) {
+      const i = c * days + d;
+      let ok = true;
+      for (const q of p.plain) if (q.arr[i] < q.lo || q.arr[i] > q.hi) ok = false;
+      if (ok && p.daylight) {
+        const h = daylight[cellRow[c] * days + d];
+        if (h < p.daylight[0] || h > p.daylight[1]) ok = false;
+      }
+      if (!ok) continue;
+      let ok0 = true, ok1 = true;
+      for (const q of p.temps) {
+        const v = q.arr[i];
+        if (v + SHIFTS[l0] < q.lo || v + SHIFTS[l0] > q.hi) ok0 = false;
+        if (v + SHIFTS[l1] < q.lo || v + SHIFTS[l1] > q.hi) ok1 = false;
+      }
+      m1[d] = (1 - f) * (ok0 ? 1 : 0) + f * (ok1 ? 1 : 0);
+      match[d] += w * m1[d];
     }
-    if (ok) for (const q of p.temps) if (q.arr[i] + shift < q.lo || q.arr[i] + shift > q.hi) ok = false;
-    match[d] = ok ? 1 : 0;
+    for (let m = 0; m < 12; m++) {
+      const a = MONTH_START[m], b = MONTH_START[m + 1];
+      const mean = (v: ClimVar, sh = 0) => {
+        const arr = data[v];
+        if (!arr) return undefined;
+        let s = 0, k = 0;
+        for (let d = a; d < b; d++) {
+          const code = arr[c * days + d];
+          if (meta.vars[v].nodata !== undefined && code === meta.vars[v].nodata) continue;
+          s += decodeValue(v, code) + sh;
+          k++;
+        }
+        return k ? s / k : undefined;
+      };
+      const count = (v: ClimVar, f: (x: number) => boolean) => {
+        const arr = data[v];
+        if (!arr) return undefined;
+        let k = 0;
+        for (let d = a; d < b; d++) if (f(decodeValue(v, arr[c * days + d]))) k++;
+        return k;
+      };
+      let mt = 0;
+      for (let d = a; d < b; d++) mt += m1[d];
+      add(m, 'match', mt, w);
+      add(m, 'feels', mean('feels', shift), w);
+      add(m, 'tmax', mean('tmax', shift), w);
+      add(m, 'tmin', mean('tmin', shift), w);
+      add(m, 'dew', mean('dew'), w);
+      add(m, 'cloud', mean('cloud'), w);
+      add(m, 'wind', mean('wind'), w);
+      add(m, 'sst', mean('sst'), w);
+      add(m, 'sun', mean('sun'), w);
+      const pm = mean('precip');
+      add(m, 'precip', pm === undefined ? undefined : pm * (b - a), w);
+      add(m, 'rainDays', count('precip', (x) => x >= 1), w);
+      add(m, 'sunnyDays', count('cloud', (x) => x <= 25), w);
+      add(m, 'snowDays', count('snow', (x) => x >= 1), w);
+    }
   }
+
   const daily = new Float32Array(days);
   const half = 10;
   for (let d = 0; d < days; d++) {
@@ -298,60 +378,29 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
     }
     daily[d] = s / ws;
   }
-  const loaded = (Object.keys(data) as ClimVar[]).filter((v) => data[v]);
-  const months: Partial<MonthStats>[] = [];
-  for (let m = 0; m < 12; m++) {
-    const a = MONTH_START[m], b = MONTH_START[m + 1];
-    const n = b - a;
-    const st: Partial<MonthStats> = {};
-    let mt = 0;
-    for (let d = a; d < b; d++) mt += match[d];
-    st.match = mt;
-    const mean = (v: ClimVar, sh = 0) => {
-      const arr = data[v];
-      if (!arr) return undefined;
-      let s = 0, k = 0;
-      for (let d = a; d < b; d++) {
-        const code = arr[c * days + d];
-        if (meta.vars[v].nodata !== undefined && code === meta.vars[v].nodata) continue;
-        s += decodeValue(v, code) + sh;
-        k++;
-      }
-      return k ? s / k : undefined;
-    };
-    const count = (v: ClimVar, f: (x: number) => boolean) => {
-      const arr = data[v];
-      if (!arr) return undefined;
-      let k = 0;
-      for (let d = a; d < b; d++) if (f(decodeValue(v, arr[c * days + d]))) k++;
-      return k;
-    };
-    st.feels = mean('feels', shift);
-    st.tmax = mean('tmax', shift);
-    st.tmin = mean('tmin', shift);
-    st.dew = mean('dew');
-    st.cloud = mean('cloud');
-    st.wind = mean('wind');
-    st.sst = mean('sst');
-    st.sun = mean('sun');
-    const pm = mean('precip');
-    st.precip = pm === undefined ? undefined : pm * n;
-    st.rainDays = count('precip', (x) => x >= 1);
-    st.sunnyDays = count('cloud', (x) => x <= 25);
-    st.snowDays = count('snow', (x) => x >= 1);
-    months.push(st);
-  }
+  const months = sums.map((sm, m) => {
+    const st: Record<string, number> = {};
+    for (const k of Object.keys(sm)) st[k] = sm[k] / wsum[m][k];
+    return st as Partial<MonthStats>;
+  });
   const perYear = match.reduce((s, x) => s + x, 0) * (365 / days);
+  const mc = cellIndex[main.p];
   return {
-    cellLon: g.lon0 + cellCol[c] * g.dx,
-    cellLat: g.lat0 - cellRow[c] * g.dy,
-    cellElev,
-    shift,
+    cellLon: g.lon0 + cellCol[mc] * g.dx,
+    cellLat: g.lat0 - cellRow[mc] * g.dy,
+    cellElev: cells.elev[mc],
+    shift: -LAPSE * main.dz,
+    cells: taps.length,
     perYear,
     daily,
     months,
     loaded,
   };
+}
+
+/** An elevation shift clamped to the range the map's levels cover. */
+function levelShift(dz: number) {
+  return Math.min(DZ0 + (LEVELS - 1) * DZ_STEP, Math.max(DZ0, dz));
 }
 
 ctx.onmessage = async (e: MessageEvent) => {

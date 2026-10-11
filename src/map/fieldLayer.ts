@@ -12,6 +12,7 @@
 import type { CustomLayerInterface, CustomRenderMethodInput, Map as MlMap } from 'maplibre-gl';
 import { domain, rasterize, type Palette } from './palettes';
 import type { ConicGrid } from '../live/hrrr';
+import { EXCESS_SCALE } from '../climate/blend';
 
 export interface GridSpec {
   nx: number;
@@ -193,18 +194,39 @@ void main() {
     }
     col = shade(q, 0.0);
   } else {
-    vec2 uv = vec2((lon - u_cgrid.x) / u_cgrid.z + 0.5, (u_cgrid.y - lat) / u_cgrid.w + 0.5) / u_cgridSize;
-    if (uv.y < -0.5 / u_cgridSize.y || uv.y > 1.0 + 0.5 / u_cgridSize.y) discard;
-    vec2 ev = bicubic(u_cellElev, uv).rg;
-    if (ev.y < 0.04) discard;
-    float zc = ev.x / ev.y;
-    float lvl = clamp((demElev(lon, lat) - zc - u_levels.y) / u_levels.z, 0.0, u_levels.x - 1.0);
-    float l0 = floor(lvl);
-    vec2 r0 = bicubicArr(u_result, uv, l0).rg;
-    vec2 r1 = bicubicArr(u_result, uv, min(l0 + 1.0, u_levels.x - 1.0)).rg;
-    float v = mix(r0.x / max(r0.y, 1e-4), r1.x / max(r1.y, 1e-4), lvl - l0);
+    // Same rules as src/climate/blend.ts: B-spline over the 4x4 nearby cells,
+    // each evaluated at this pixel's elevation; cells that can't reach it fade out.
+    vec2 x = vec2((lon - u_cgrid.x) / u_cgrid.z, (u_cgrid.y - lat) / u_cgrid.w);
+    vec2 i0 = floor(x);
+    vec4 wx4 = cubicW(x.x - i0.x), wy4 = cubicW(x.y - i0.y);
+    float wx[4] = float[4](wx4.x, wx4.y, wx4.z, wx4.w);
+    float wy[4] = float[4](wy4.x, wy4.y, wy4.z, wy4.w);
+    float z = demElev(lon, lat);
+    float lmax = u_levels.x - 1.0;
+    float sv = 0.0, sq = 0.0, cover = 0.0;
+    for (int j = 0; j < 4; j++) {
+      int yy = int(i0.y) + j - 1;
+      if (yy < 0 || yy >= int(u_cgridSize.y)) continue;
+      for (int i = 0; i < 4; i++) {
+        int xx = int(mod(i0.x + float(i - 1), u_cgridSize.x));
+        vec2 ce = texelFetch(u_cellElev, ivec2(xx, yy), 0).rg;
+        if (ce.y < 0.5) continue;
+        float w = wx[i] * wy[j];
+        cover += w;
+        float want = (z - ce.x - u_levels.y) / u_levels.z;
+        float lc = clamp(want, 0.0, lmax);
+        float q = w * exp(-abs(want - lc) * u_levels.z / ${EXCESS_SCALE.toFixed(1)});
+        float l0 = floor(lc);
+        float a = texelFetch(u_result, ivec3(xx, yy, int(l0)), 0).r;
+        float b = texelFetch(u_result, ivec3(xx, yy, int(min(l0 + 1.0, lmax))), 0).r;
+        sv += q * mix(a, b, lc - l0);
+        sq += q;
+      }
+    }
+    if (cover < 0.04) discard;
+    float v = sv / max(sq, 1e-20);
     col = shade(v, 0.0);
-    alpha = smoothstep(0.04, 0.35, ev.y);
+    alpha = smoothstep(0.04, 0.35, cover);
     if (u_cut > 0.0) {
       float keep = smoothstep(u_cut - 0.012, u_cut, v);
       col = mix(vec4(0.86, 0.86, 0.84, 0.55), col, keep);

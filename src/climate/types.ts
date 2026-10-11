@@ -56,7 +56,8 @@ export interface DetailResult {
   cellLon: number;
   cellLat: number;
   cellElev: number;
-  shift: number; // °C applied for the point's elevation
+  shift: number; // °C applied to the main cell for the point's elevation
+  cells: number; // how many nearby cells were blended (the main one is cellLon/cellLat)
   perYear: number;
   daily: Float32Array; // smoothed probability per day of year
   months: Partial<MonthStats>[];
