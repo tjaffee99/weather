@@ -51,7 +51,7 @@ export const CRITERIA: CritDef[] = [
   {
     v: 'sun', group: 'Sky & air', label: 'Sunshine', hint: 'Hours of direct sun in the day', q: 'hours', kind: 'continuous',
     metric: { min: 0, max: 16, step: 0.5 }, imperial: { min: 0, max: 16, step: 0.5 }, file: 'sun',
-    def: [6, Infinity], // a mostly sunny day, even in winter at mid-latitudes
+    def: [7, Infinity], // a sunny day for most of the year outside high latitudes
   },
   {
     v: 'precip', group: 'Rain & wind', label: 'Precipitation', hint: 'Rain or melted snow per day', q: 'precip', kind: 'bins',
@@ -92,12 +92,12 @@ export interface Preset {
 
 const I = Infinity;
 export const PRESETS: Preset[] = [
-  { id: 'perfect', label: 'Perfect day', icon: '✨', state: { feels: [18, 27], cloud: [-I, 40], precip: [-I, 1] } },
-  { id: 'beach', label: 'Beach', icon: '🏖', state: { feels: [26, 36], cloud: [-I, 40], precip: [-I, 1], wind: [-I, 30], sst: [24, I] } },
+  { id: 'perfect', label: 'Perfect day', icon: '✨', state: { feels: [18, 27], sun: [7, I], precip: [-I, 1] } },
+  { id: 'beach', label: 'Beach', icon: '🏖', state: { feels: [26, 36], sun: [7, I], precip: [-I, 1], wind: [-I, 30], sst: [24, I] } },
   { id: 'ski', label: 'Skiing', icon: '⛷', state: { tmax: [-12, 4], snow: [30, I], wind: [-I, 40] } },
   { id: 'hike', label: 'Hiking', icon: '🥾', state: { feels: [10, 24], precip: [-I, 1], wind: [-I, 30] } },
   { id: 'dry', label: 'Not muggy', icon: '🌵', state: { dew: [-I, 13], feels: [16, 30] } },
-  { id: 'sunny', label: 'Sunny', icon: '☀️', state: { sun: [9, I], precip: [-I, 1] } },
+  { id: 'sunny', label: 'Sunny', icon: '☀️', state: { sun: [7, I], precip: [-I, 1] } },
   { id: 'rain', label: 'Rainy', icon: '☔', state: { precip: [1, I] } },
   { id: 'snowy', label: 'Snowy', icon: '❄️', state: { snow: [5, I] } },
 ];

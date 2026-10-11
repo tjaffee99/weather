@@ -2,7 +2,7 @@
 
 An interactive world weather map with two views:
 
-- **Climate finder** (the home page): add conditions such as feels-like high, daytime high, overnight low, humidity, hours of sunshine, cloud cover, precipitation, wind, snow on the ground, sea temperature and daylight. Start from a preset (perfect day, beach, skiing…) or use the grouped "Add condition" menu. Each condition starts from a sensible range (e.g. feels-like 18–27 °C, cloud ≤ 40%, a dry day ≤ 1 mm, wind below a fresh breeze, sea ≥ 24 °C). A three-way switch at the top of the panel chooses what the colours show:
+- **Climate finder** (the home page): add conditions such as feels-like high, daytime high, overnight low, humidity, hours of sunshine, cloud cover, precipitation, wind, snow on the ground, sea temperature and daylight. Start from a preset (perfect day, beach, skiing…) or use the grouped "Add condition" menu. Each condition starts from a sensible range (e.g. feels-like 18–27 °C, at least 7 hours of sunshine, a dry day ≤ 1 mm, wind below a fresh breeze, sea ≥ 24 °C). A three-way switch at the top of the panel chooses what the colours show:
   - **Days per year**: how many days a year each place meets all of your conditions, based on 2001–2025 ERA5 reanalysis. "Highlight at least" answers "where do I get at least N such days a year?" by dimming everything below it.
   - **Chance by date**: the chance that a day around the chosen date matches. Drag the date slider or press play to animate through the year.
   - **Right now**: the same conditions checked against the latest NOAA GFS forecast, at the current hour or any hour in the next 3 days, to show where it is nice right now. Temperatures are the current reading (terrain-adjusted), precipitation is the current rate, and sea temperature comes from the model's sea surface. Sliders update the map instantly on the GPU, and matching cities get a ✓ with their temperature.
@@ -30,7 +30,7 @@ Snow depth over the contiguous US and Alaska comes from NOAA's 3 km [HRRR](https
 - high and low
 - daytime dew point
 - daytime cloud cover
-- hours of sunshine (WMO definition: direct normal irradiance ≥ 120 W/m², from ERA5 direct radiation and the sun angle; `--only-sun` adds it to an existing sample)
+- hours of sunshine (WMO definition: direct normal irradiance ≥ 120 W/m²). It is estimated from ERA5 direct and clear-sky direct radiation and the sun angle, and calibrated against annual totals at 18 stations from Phoenix to Reykjavik (median ratio 1.03, typical error 7%). `--only-sun` adds it to an existing sample.
 - daily precipitation
 - strongest daytime wind
 - snow depth

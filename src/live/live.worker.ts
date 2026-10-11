@@ -116,6 +116,10 @@ function seaSurface(skin: Float32Array, land: Float32Array, ice: Float32Array, n
 /**
  * Hours of sunshine over the 24 h around forecast hour fh. GFS SUNSD resets
  * every 6 hours, so the value at each 6-hourly step is that bucket's total.
+ * GFS counts any clear daylight as sunshine, even with the sun on the horizon;
+ * WMO sunshine needs a 120 W/m2 direct beam, which a clear sky gives only
+ * above about 3 degrees of solar elevation, so each bucket is capped by the
+ * time the sun spends above that.
  */
 async function sunshineHours(cycle: Cycle, fh: number): Promise<Float32Array> {
   const start = Math.min(96, Math.max(0, Math.round((fh - 12) / 6) * 6));
@@ -123,6 +127,47 @@ async function sunshineHours(cycle: Cycle, fh: number): Promise<Float32Array> {
   const parts = await Promise.all(ends.map((e) => fetchField(cycle, e, 'sunsd')));
   const n = parts[0][0].values.length;
   const out = new Float32Array(n);
-  for (const [f] of parts) for (let i = 0; i < n; i++) out[i] += f.values[i] / 3600;
+  const possible = new Float32Array(n);
+  parts.forEach(([f], k) => {
+    sunUpHours(cycle.time + (ends[k] - 6) * 3600_000, 6, possible);
+    for (let i = 0; i < n; i++) out[i] += Math.min(f.values[i] / 3600, possible[i]);
+  });
   return out;
+}
+
+/** Hours with the sun at least 3 degrees up, per GFS grid point, over [t0, t0 + hours). */
+function sunUpHours(t0: number, hours: number, out: Float32Array) {
+  const NX = 1440, NY = 721, STEP = 0.25; // hours
+  out.fill(0);
+  const minSin = Math.sin((3 * Math.PI) / 180);
+  const sinLat = new Float64Array(NY), cosLat = new Float64Array(NY), cosH = new Float64Array(NX);
+  for (let r = 0; r < NY; r++) {
+    const phi = ((90 - r * 0.25) * Math.PI) / 180;
+    sinLat[r] = Math.sin(phi);
+    cosLat[r] = Math.cos(phi);
+  }
+  for (let s = 0; s < hours / STEP; s++) {
+    const t = new Date(t0 + (s + 0.5) * STEP * 3600_000);
+    const utcH = t.getUTCHours() + t.getUTCMinutes() / 60 + t.getUTCSeconds() / 3600;
+    const doy = (Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - Date.UTC(t.getUTCFullYear(), 0, 1)) / 86400_000 + 1;
+    // NOAA solar position approximations
+    const g = ((2 * Math.PI) / 365) * (doy - 1 + (utcH - 12) / 24);
+    const eqt = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+    const decl =
+      0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) +
+      0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+    const sd = Math.sin(decl), cd = Math.cos(decl);
+    for (let c = 0; c < NX; c++) cosH[c] = Math.cos((((utcH * 60 + eqt + 4 * c * 0.25) / 4 - 180) * Math.PI) / 180);
+    for (let r = 0; r < NY; r++) {
+      const a = sinLat[r] * sd, b = cosLat[r] * cd;
+      // skip rows where the sun is below the threshold all day, or above it all day
+      if (a + b < minSin) continue;
+      const row = r * NX;
+      if (a - b >= minSin) {
+        for (let c = 0; c < NX; c++) out[row + c] += STEP;
+        continue;
+      }
+      for (let c = 0; c < NX; c++) if (a + b * cosH[c] >= minSin) out[row + c] += STEP;
+    }
+  }
 }

@@ -293,7 +293,13 @@ def cos_zenith(t: dt.datetime, lat_c, lon_c):
     return np.sin(phi) * np.sin(decl) + np.cos(phi) * np.cos(decl) * np.cos(ha)
 
 
-SUN_RATIOS = (0.6, 0.7, 0.8, 0.9, 1.0)
+# Ratios of direct to clear-sky direct radiation below this count as no sunshine.
+# Calibrated against annual sunshine at 18 stations worldwide (Phoenix to
+# Reykjavik): median ratio 1.03, mean error 7%. A plain ratio (floor 0) was 9%
+# too sunny overall and 15-30% too sunny in cloudy climates, where ERA5 lets
+# too much direct light through; floors of 0.2 and above or powers of the
+# ratio fitted worse.
+SUN_FLOOR = 0.1
 
 
 def sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs):
@@ -301,10 +307,8 @@ def sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs):
 
     WMO sunshine = direct normal irradiance >= 120 W/m2. On 1-degree cell means
     a threshold would count a half-cloudy hour as fully sunny, so each hour
-    counts the fraction of clear-sky direct radiation that got through,
-    min(1, (direct / clear-sky direct) / r), in hours where the clear-sky beam
-    exceeds 120 W/m2. Several r are written (sun_<r>); encode_climate.py uses
-    the one calibrated against station sunshine records.
+    counts the share of clear-sky direct radiation that got through (rescaled
+    above SUN_FLOOR), in hours where the clear-sky beam exceeds 120 W/m2.
     """
     R, C = cz.rows, cz.cols
     nblocks = (365 + L - 1) // L
@@ -339,30 +343,23 @@ def sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs):
             cdir = got[("clear_sky_direct_solar_radiation_at_surface", h)]
             possible = (mu > 0.03) & (cdir / 3600.0 / np.maximum(mu, 0.03) >= 120.0)
             ratio[n] = np.where(possible, np.clip(fdir / np.maximum(cdir, 1.0), 0, 1), -1)
-        out = {}
-        for r in SUN_RATIOS:
-            frac = np.where(ratio < 0, 0, np.clip(ratio / r, 0, 1))
-            sun = np.zeros((ndays, R, C), np.float32)
-            for k in range(ndays):
-                idx = 24 * k + loc_h[:, None] - offs[None, :] + 12
-                idx = np.broadcast_to(idx[:, None, :], (24, R, C))
-                sun[k] = np.take_along_axis(frac, idx + 1, 0).sum(0)
-            out[f"sun_{r}"] = sun
-        np.savez(part, doy0=doy0, year=year, **out)
+        frac = np.where(ratio < 0, 0, np.clip((ratio - SUN_FLOOR) / (1 - SUN_FLOOR), 0, 1))
+        sun = np.zeros((ndays, R, C), np.float32)
+        for k in range(ndays):
+            idx = 24 * k + loc_h[:, None] - offs[None, :] + 12
+            idx = np.broadcast_to(idx[:, None, :], (24, R, C))
+            sun[k] = np.take_along_axis(frac, idx + 1, 0).sum(0)
+        np.savez(part, doy0=doy0, year=year, sun=sun)
         print(f"sun block {b+1}/{nblocks} {start:%Y-%m-%d} elapsed={time.time()-t_start:.0f}s", flush=True)
 
     if args.limit_blocks:
         return
-    res = {}
-    for r in SUN_RATIOS:
-        o = np.full((365, R, C), np.nan, np.float32)
-        for b in range(nblocks):
-            d = np.load(os.path.join(part_dir, f"b{b:03d}.npz"))
-            arr = d[f"sun_{r}"]
-            for k in range(arr.shape[0]):
-                o[(int(d["doy0"]) + k) % 365] = arr[k]
-        res[f"sun_{r}"] = o
-    np.savez(os.path.join(args.work, "samples_sun.npz"), **res)
+    o = np.full((365, R, C), np.nan, np.float32)
+    for b in range(nblocks):
+        d = np.load(os.path.join(part_dir, f"b{b:03d}.npz"))
+        for k in range(d["sun"].shape[0]):
+            o[(int(d["doy0"]) + k) % 365] = d["sun"][k]
+    np.savez(os.path.join(args.work, "samples_sun.npz"), sun=o)
     print("wrote samples_sun.npz")
 
 
