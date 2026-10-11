@@ -38,7 +38,8 @@ export const LIVE_LAYERS: LayerDef[] = [
   { id: 'snow', label: 'Snow depth', icon: '❄', palette: SNOW_DEPTH, q: 'snow', lapse: false, legend: [1, 10, 50, 200], legendImperial: [1, 4, 20, 80] },
 ];
 
-const GRID: GridSpec = { nx: 1440, ny: 721, lon0: 0, lat0: 90, dx: 0.25, dy: 0.25 };
+export const GFS_GRID: GridSpec = { nx: 1440, ny: 721, lon0: 0, lat0: 90, dx: 0.25, dy: 0.25 };
+const GRID = GFS_GRID;
 
 type FieldData = { values: Float32Array; u?: Float32Array; v?: Float32Array };
 
@@ -77,7 +78,7 @@ export class LiveController {
   maxTime = 0;
   private pool = new LivePool(2);
   private cache = new Map<string, Promise<FieldData>>();
-  private orog?: Float32Array;
+  orog?: Float32Array;
   private shown = { a: '', b: '', alt: '' };
   private current: { a?: Float32Array; b?: Float32Array; mix: number } = { mix: 0 };
   private loadToken = 0;

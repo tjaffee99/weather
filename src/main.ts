@@ -281,6 +281,10 @@ map.on('load', async () => {
     };
     liveUi = new LiveUI(live, els, dem, closeCard);
     climateUi = new ClimateUI(map, field, els, cities, dem, setStatus, closeCard, BASE);
+    // "Right now" in the climate finder checks conditions against the live forecast
+    climateUi.live = live;
+    climateUi.liveReady = liveReady;
+    climateUi.nowCard = (lon, lat, placeP) => liveUi.showCard(lon, lat, placeP ?? reverseGeocode(lon, lat, cities));
     const startLive = () =>
       live
         .init()

@@ -6,21 +6,56 @@
  */
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { FieldLayer } from '../map/fieldLayer';
-import { SCORE, cssGradient } from '../map/palettes';
+import { MATCH, SCORE, cssGradient } from '../map/palettes';
+import type { LiveController } from '../live/liveController';
+import { bilinear, GFS_GRID } from '../live/liveController';
+import type { LiveVar } from '../live/gfs';
 import { demAt, type City, type Dem } from '../data';
 import type { Place } from '../geocode';
 import { pointElevation } from '../map/localDem';
 import { h, clear } from '../ui/dom';
 import { RangeSlider } from '../ui/rangeSlider';
 import { renderLegend } from '../ui/legend';
-import { MONTHS, MONTH_START, coordLabel, doyLabel, todayDoy } from '../ui/format';
+import { MONTHS, MONTH_START, coordLabel, doyLabel, timeLabel, todayDoy } from '../ui/format';
 import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
 import { CRITERIA, GROUPS, PRESETS, type CritDef, type CritState } from './criteria';
 import { DZ0, DZ_STEP, LEVELS, type ClimVar, type ClimateMeta, type CritVar, type Criterion, type DetailResult } from './types';
 
 type Els = { panel: HTMLElement; bottom: HTMLElement; legend: HTMLElement; card: HTMLElement };
-type Mode = 'days' | 'date';
+type Mode = 'days' | 'date' | 'now';
 const HALF_WINDOW = 10;
+const HOUR = 3600_000;
+const LAPSE = 0.0065;
+
+/**
+ * "Right now": which live GFS field each condition is checked against.
+ * kind: 0 plain, 1 temperature (terrain-adjusted), 2 rate in mm/h compared as a
+ * daily total, 3 daylight hours computed from latitude and date.
+ */
+const NOW: Record<CritVar, { v: LiveVar | null; kind: number; soft: number; label?: string }> = {
+  feels: { v: 'feels', kind: 1, soft: 0.8, label: 'Feels like' },
+  tmax: { v: 'temp', kind: 1, soft: 0.8, label: 'Temperature' },
+  tmin: { v: 'temp', kind: 1, soft: 0.8, label: 'Temperature' },
+  dew: { v: 'dew', kind: 0, soft: 0.8 },
+  cloud: { v: 'cloud', kind: 0, soft: 4 },
+  precip: { v: 'precip', kind: 2, soft: 0.25 },
+  wind: { v: 'wind', kind: 0, soft: 1.5 },
+  snow: { v: 'snow', kind: 0, soft: 1 },
+  sst: { v: 'sst', kind: 0, soft: 0.5 },
+  daylight: { v: null, kind: 3, soft: 0.2 },
+};
+
+function daylightHours(lat: number, doy: number) {
+  const phi = (lat * Math.PI) / 180;
+  const decl = ((23.44 * Math.PI) / 180) * Math.sin((2 * Math.PI * (285 + doy)) / 365);
+  const c = (Math.sin((-0.833 * Math.PI) / 180) - Math.sin(phi) * Math.sin(decl)) / (Math.cos(phi) * Math.cos(decl));
+  return c <= -1 ? 24 : c >= 1 ? 0 : (24 / Math.PI) * Math.acos(c);
+}
+
+const utcDoy = (t: number) => {
+  const d = new Date(t);
+  return Math.min(364, Math.floor((t - Date.UTC(d.getUTCFullYear(), 0, 1)) / 86400_000));
+};
 
 export class ClimateUI {
   private worker: Worker;
@@ -45,6 +80,16 @@ export class ClimateUI {
   private cardPlace: Promise<Place | null> = Promise.resolve(null);
   private dateLabel?: HTMLElement;
   private dateRange?: HTMLInputElement;
+  // "right now" state
+  private nowTime = Date.now();
+  private nowKey = '';
+  private nowToken = 0;
+  private nowSlots: { c: Criterion; data: Float32Array | null }[] = [];
+  private nowTemp?: Float32Array;
+  private nowTimer = 0;
+  live?: LiveController;
+  liveReady: Promise<void> = Promise.resolve();
+  nowCard?: (lon: number, lat: number, placeP?: Promise<Place | null>) => void;
 
   constructor(
     private map: MlMap,
@@ -131,6 +176,7 @@ export class ClimateUI {
     }
     if (!this.active) return;
     this.renderPanel();
+    this.lastMode = null;
     this.requery();
   }
 
@@ -161,13 +207,18 @@ export class ClimateUI {
   }
 
   private requery() {
+    if (this.mode === 'now') {
+      this.refreshNow();
+      this.writeUrl();
+      return;
+    }
     if (!this.meta || !this.active) return;
     if (this.inflight) {
       this.dirty = true;
       return;
     }
     this.inflight = true;
-    const mode = this.mode, doy = this.doy;
+    const mode = this.mode as 'days' | 'date', doy = this.doy;
     const crit = this.criteria();
     const slow = setTimeout(() => this.setStatus('Crunching 25 years of weather…'), 400);
     this.call({ type: 'query', crit, mode, doy, half: HALF_WINDOW })
@@ -175,6 +226,8 @@ export class ClimateUI {
         if (!this.active) return;
         console.debug(`climate query (${mode}) ${m.ms.toFixed(0)} ms`);
         this.result = { data: m.data, scaleMax: m.scaleMax, mode, doy };
+        if (this.mode !== mode) return;
+        if (this.lastMode !== mode) this.field.setPalette(SCORE);
         this.field.mode = 1;
         this.field.setClimateResult(m.data);
         this.applyCut();
@@ -204,13 +257,15 @@ export class ClimateUI {
     const p = this.els.panel;
     const scroll = p.scrollTop;
     clear(p);
-    const year = this.mode === 'days';
     // what the colours mean
+    const tab = (m: Mode, label: string, title: string) =>
+      h('button', { role: 'tab', title, 'aria-selected': String(this.mode === m), onclick: () => this.setWhen(m) }, label);
     const view = h(
       'div',
       { class: 'seg view-seg', role: 'tablist', 'aria-label': 'Show' },
-      h('button', { role: 'tab', 'aria-selected': String(year), onclick: () => this.setWhen('days') }, 'Days per year'),
-      h('button', { role: 'tab', 'aria-selected': String(!year), onclick: () => this.setWhen('date') }, 'Chance by date'),
+      tab('days', 'Per year', 'How many days a year match (2001–2025)'),
+      tab('date', 'By date', 'Chance that a day around a date matches'),
+      tab('now', 'Right now', 'Where the live forecast matches now or in the next 3 days'),
     );
     const presets = h('div', { class: 'presets' });
     for (const pr of PRESETS)
@@ -228,10 +283,12 @@ export class ClimateUI {
       h(
         'p',
         {},
-        'ERA5 reanalysis, 2001–2025: one real day per calendar day at every 1° land cell, in local solar time. Temperatures are adjusted to the local terrain (−6.5 °C per km). Tap the map for monthly details.',
+        'Per year / By date: ERA5 reanalysis, 2001–2025, one real day per calendar day at every 1° land cell, in local solar time. Right now: the latest NOAA GFS forecast, comparing current temperatures and the current precipitation rate. Temperatures are adjusted to the local terrain (−6.5 °C per km).',
       ),
     );
-    p.append(view, presets, list, this.addMenu(), this.cutRow(), about);
+    p.append(view, presets, list, this.addMenu());
+    if (this.mode !== 'now') p.append(this.cutRow());
+    p.append(about);
     p.scrollTop = scroll;
   }
 
@@ -254,7 +311,8 @@ export class ClimateUI {
       '✕',
     );
     const sl = this.makeSlider(def, cur, (r) => (val.textContent = describe(def, r)));
-    return h('div', { class: 'cond', title: def.hint }, h('div', { class: 'cond-head' }, h('span', { class: 'cond-name' }, def.label), val, remove), sl.el);
+    const name = this.mode === 'now' ? NOW[def.v].label ?? def.label : def.label;
+    return h('div', { class: 'cond', title: def.hint }, h('div', { class: 'cond-head' }, h('span', { class: 'cond-name' }, name), val, remove), sl.el);
   }
 
   /** "+ Add condition" dropdown, grouped by theme. */
@@ -404,6 +462,10 @@ export class ClimateUI {
     clear(b);
     this.dateRange = undefined;
     this.dateLabel = undefined;
+    if (this.mode === 'now') {
+      this.renderNowBar();
+      return;
+    }
     if (this.mode !== 'date') {
       b.classList.add('hidden');
       return;
@@ -442,15 +504,132 @@ export class ClimateUI {
     );
   }
 
-  /** Switch between "days per year" and "chance on a date". */
-  private setWhen(m: Mode) {
-    if (m === 'days') this.stopPlay();
+  /** Switch between "days per year", "chance on a date" and "right now". */
+  private async setWhen(m: Mode) {
+    if (m !== 'date') this.stopPlay();
     if (this.mode === m) return;
     this.mode = m;
     this.renderPanel();
     this.renderBottom();
+    await this.field.fadeTo(0, 120);
+    if (this.mode !== m) return;
+    this.lastMode = null;
     this.requery();
   }
+
+  // ---------- right now (live forecast) ----------
+  private nowRange(): [number, number] {
+    const start = Math.floor(Date.now() / HOUR) * HOUR;
+    const end = this.live?.cycle ? Math.min(this.live.maxTime, start + 72 * HOUR) : start + 72 * HOUR;
+    return [start, end];
+  }
+
+  private renderNowBar() {
+    const b = this.els.bottom;
+    b.classList.remove('hidden');
+    const [t0, t1] = this.nowRange();
+    this.nowTime = Math.min(t1, Math.max(t0, this.nowTime));
+    const label = h('span', { class: 'timeline-label' }, timeLabel(this.nowTime));
+    const range = h('input', {
+      type: 'range',
+      class: 'single-range',
+      min: 0,
+      max: Math.round((t1 - t0) / HOUR),
+      step: 1,
+      value: Math.round((this.nowTime - t0) / HOUR),
+      'aria-label': 'Forecast time',
+      oninput: () => {
+        this.nowTime = t0 + +range.value * HOUR;
+        label.textContent = timeLabel(this.nowTime);
+        clearTimeout(this.nowTimer);
+        this.nowTimer = window.setTimeout(() => this.refreshNow(), 120);
+      },
+    });
+    const ticks = h('div', { class: 'ticks' });
+    const midnight = new Date(t0);
+    midnight.setHours(24, 0, 0, 0);
+    for (let t = midnight.getTime(); t < t1; t += 24 * HOUR) {
+      const sp = h('span', {}, new Date(t).toLocaleDateString(undefined, { weekday: 'short' }));
+      sp.style.left = `${((t - t0) / (t1 - t0)) * 100}%`;
+      ticks.append(sp);
+    }
+    b.append(
+      h('div', { class: 'now-dot', 'aria-hidden': 'true' }),
+      h('div', { class: 'timeline' }, h('div', { class: 'timeline-top' }, label, h('span', { class: 'timeline-sub' }, 'live forecast · NOAA GFS')), range, ticks),
+    );
+  }
+
+  private nowRanges(): [number, number, number, number][] {
+    return this.nowSlots.map(({ c }) => {
+      const n = NOW[c.v];
+      return [c.lo, c.hi, n.soft, n.kind];
+    });
+  }
+
+  /** Load the live fields the conditions need for the chosen hour, then update the map. */
+  private async refreshNow() {
+    if (!this.active || this.mode !== 'now') return;
+    const token = ++this.nowToken;
+    const crit = this.criteria();
+    const slow = setTimeout(() => this.setStatus('Loading the live forecast…'), 250);
+    try {
+      await this.liveReady;
+      const live = this.live;
+      if (!live?.cycle) throw new Error('live forecast unavailable');
+      const fh = Math.max(0, Math.min(120, Math.round((this.nowTime - live.cycle.time) / HOUR)));
+      const key = `${live.cycle.time}:${fh}:${crit.map((c) => NOW[c.v].v).join(',')}`;
+      if (key !== this.nowKey) {
+        const vars = crit.map((c) => NOW[c.v].v);
+        const [fields, temp] = await Promise.all([
+          Promise.all(vars.map((v) => (v ? live.get(v, fh).then((f) => f.values) : Promise.resolve(null)))),
+          live.get('temp', fh).then((f) => f.values),
+        ]);
+        if (token !== this.nowToken || this.mode !== 'now') return;
+        this.field.setMatchFields(GFS_GRID, fields);
+        this.nowKey = key;
+        this.nowTemp = temp;
+        this.nowSlots = crit.map((c, i) => ({ c, data: fields[i] }));
+      } else {
+        // same fields: only the ranges changed
+        this.nowSlots = crit.map((c, i) => ({ c, data: this.nowSlots[i]?.data ?? null }));
+      }
+      live.time = this.nowTime;
+      this.field.setMatchRanges(this.nowRanges(), utcDoy(this.nowTime));
+      if (this.lastMode !== 'now') {
+        this.field.setPalette(MATCH);
+        this.field.mode = 2;
+        this.field.opacity = 1;
+        this.lastMode = 'now';
+        this.field.fadeTo(1, 280);
+      }
+      this.renderLegendBox();
+      clearTimeout(this.cutTimer);
+      this.cutTimer = window.setTimeout(() => this.updateCities(), 150);
+      this.setStatus('');
+    } catch (e) {
+      if (token === this.nowToken) this.setStatus(`Live forecast unavailable: ${(e as Error).message}`, false, true);
+    } finally {
+      clearTimeout(slow);
+    }
+  }
+
+  /** Does the live forecast meet every condition at this city? (hard bounds) */
+  private nowMatches(c: City): boolean {
+    const orog = this.live?.orog;
+    const doy = utcDoy(this.nowTime);
+    for (const { c: cr, data } of this.nowSlots) {
+      const n = NOW[cr.v];
+      let v: number;
+      if (n.kind === 3) v = daylightHours(c.lat, doy);
+      else if (!data) return false;
+      else v = bilinear(data, c.lon, c.lat);
+      if (n.kind === 1 && orog) v += LAPSE * (bilinear(orog, c.lon, c.lat) - (c.elev ?? demAt(this.dem, c.lon, c.lat)));
+      if (n.kind === 2) v = Math.max(0, v) * 24;
+      if (v < cr.lo || v > cr.hi) return false;
+    }
+    return true;
+  }
+
 
   private setDoy(d: number) {
     this.doy = ((Math.round(d) % 365) + 365) % 365;
@@ -488,6 +667,13 @@ export class ClimateUI {
 
   // ---------- legend & labels ----------
   private renderLegendBox() {
+    if (this.mode === 'now') {
+      renderLegend(this.els.legend, 'Matches', timeLabel(this.nowTime), MATCH, [
+        { value: 0, label: 'no' },
+        { value: 1, label: 'yes' },
+      ]);
+      return;
+    }
     if (!this.result) return;
     if (this.result.mode === 'days') {
       const m = this.result.scaleMax;
@@ -539,6 +725,13 @@ export class ClimateUI {
   }
 
   private cityLabel(c: City): string {
+    if (this.mode === 'now') {
+      if (!this.nowTemp || !this.nowMatches(c)) return '';
+      let t = bilinear(this.nowTemp, c.lon, c.lat);
+      const orog = this.live?.orog;
+      if (orog) t += LAPSE * (bilinear(orog, c.lon, c.lat) - (c.elev ?? demAt(this.dem, c.lon, c.lat)));
+      return `✓ ${fmt('temp', t)}`;
+    }
     const v = this.sampleResult(c.lon, c.lat, c.elev ?? undefined);
     const r = this.result;
     if (r && Number.isFinite(v)) {
@@ -563,6 +756,14 @@ export class ClimateUI {
 
   // ---------- location card ----------
   async showCard(lon: number, lat: number, quiet = false, placeP?: Promise<Place | null>) {
+    if (this.mode === 'now' && this.nowCard) {
+      if (!quiet) {
+        this.cardAt = null;
+        if (this.live) this.live.time = this.nowTime;
+        this.nowCard(lon, lat, placeP);
+      }
+      return;
+    }
     this.cardAt = [lon, lat];
     const card = this.els.card;
     if (placeP) this.cardPlace = placeP.catch(() => null);
@@ -640,11 +841,14 @@ export class ClimateUI {
     if (clearIt) {
       u.searchParams.delete('c');
       u.searchParams.delete('d');
+      u.searchParams.delete('view');
     } else {
       const enc = (x: number) => (Number.isFinite(x) ? String(Math.round(x * 100) / 100) : '');
       u.searchParams.set('c', Object.entries(this.state).map(([k, [a, b]]) => `${k}:${enc(a)}:${enc(b)}`).join(','));
       if (this.mode === 'date') u.searchParams.set('d', String(this.doy));
       else u.searchParams.delete('d');
+      if (this.mode === 'now') u.searchParams.set('view', 'now');
+      else u.searchParams.delete('view');
     }
     history.replaceState(null, '', u);
   }
@@ -657,6 +861,7 @@ export class ClimateUI {
       this.mode = 'date';
     }
     if (u.searchParams.get('mode') === 'date') this.mode = 'date';
+    if (u.searchParams.get('view') === 'now') this.mode = 'now';
     const c = u.searchParams.get('c');
     if (c === null) return null;
     const s: CritState = {};

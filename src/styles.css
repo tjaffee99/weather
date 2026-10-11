@@ -446,8 +446,23 @@ button {
 }
 .view-seg button {
   flex: 1;
-  padding: 6px 8px;
-  font-size: 13px;
+  padding: 6px 6px;
+  font-size: 12.5px;
+}
+.now-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #16a34a;
+  box-shadow: 0 0 0 4px rgba(22, 163, 74, 0.2);
+  flex: none;
+  margin: 0 8px 0 6px;
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    box-shadow: 0 0 0 7px rgba(22, 163, 74, 0.08);
+  }
 }
 .about {
   margin-top: 8px;

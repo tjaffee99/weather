@@ -42,6 +42,10 @@ uniform sampler2D u_dem;
 uniform sampler2D u_palette;   // 256 x 2
 uniform sampler2DArray u_result;
 uniform sampler2D u_cellElev;
+uniform sampler2DArray u_mfields; // 'match' mode: one live field per condition
+uniform int u_mcount;
+uniform vec4 u_mrange[10];       // lo, hi, softness, kind (0 plain, 1 temperature, 2 rate->daily, 3 daylight)
+uniform float u_mdoy;
 uniform sampler2D u_ldem;       // viewport high-res elevation (m)
 uniform vec4 u_ldemExt;         // its mercator extent x0,y0,x1,y1 (x1 <= x0: none)
 
@@ -119,6 +123,13 @@ vec4 shade(float v, float altMix) {
   return mix(c0, c1, altMix);
 }
 
+float daylightHours(float lat, float doy) {
+  float phi = radians(lat);
+  float decl = radians(23.44) * sin(2.0 * PI * (285.0 + doy) / 365.0);
+  float c = (sin(radians(-0.833)) - sin(phi) * sin(decl)) / (cos(phi) * cos(decl));
+  return c <= -1.0 ? 24.0 : c >= 1.0 ? 0.0 : 24.0 / PI * acos(c);
+}
+
 void main() {
   float lon = fract(v_merc.x) * 360.0 - 180.0;
   float lat = degrees(atan(sinh(PI * (1.0 - 2.0 * v_merc.y))));
@@ -135,6 +146,23 @@ void main() {
     }
     float altMix = u_useAlt > 0.0 ? smoothstep(0.25, 0.75, bicubic(u_alt, uv).r) : 0.0;
     col = shade(v, altMix);
+  } else if (u_mode == 2) {
+    // how well the live/forecast weather here meets every condition (0..1)
+    vec2 uv = vec2((lon - u_grid.x) / u_grid.z + 0.5, (u_grid.y - lat) / u_grid.w + 0.5) / u_gridSize;
+    float dz = bicubic(u_orog, uv).r - demElev(lon, lat);
+    float q = 1.0;
+    for (int i = 0; i < 10; i++) {
+      if (i >= u_mcount) break;
+      vec4 r = u_mrange[i];
+      int kind = int(r.w + 0.5);
+      float v = kind == 3 ? daylightHours(lat, u_mdoy) : bicubicArr(u_mfields, uv, float(i)).r;
+      if (kind == 1) v += 0.0065 * dz;
+      if (kind == 2) v = max(v, 0.0) * 24.0;
+      // each condition scores 0.5 exactly at its limit; the weakest one decides
+      if (r.x > -1e8) q = min(q, smoothstep(r.x - r.z, r.x + r.z, v));
+      if (r.y < 1e8) q = min(q, 1.0 - smoothstep(r.y - r.z, r.y + r.z, v));
+    }
+    col = shade(q, 0.0);
   } else {
     vec2 uv = vec2((lon - u_cgrid.x) / u_cgrid.z + 0.5, (u_cgrid.y - lat) / u_cgrid.w + 0.5) / u_cgridSize;
     if (uv.y < -0.5 / u_cgridSize.y || uv.y > 1.0 + 0.5 / u_cgridSize.y) discard;
@@ -185,6 +213,7 @@ const UNIFORMS = [
   'u_mode', 'u_fieldA', 'u_fieldB', 'u_alt', 'u_orog', 'u_dem', 'u_palette', 'u_result', 'u_cellElev',
   'u_grid', 'u_gridSize', 'u_cgrid', 'u_cgridSize', 'u_levels', 'u_mix', 'u_domain', 'u_log',
   'u_lapse', 'u_useAlt', 'u_opacity', 'u_cut', 'u_ldem', 'u_ldemExt',
+  'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy',
 ];
 
 export class FieldLayer implements CustomLayerInterface {
@@ -203,7 +232,8 @@ export class FieldLayer implements CustomLayerInterface {
   private tex: Record<string, WebGLTexture | undefined> = {};
   private grid?: GridSpec;
   private cgrid?: ClimateGridSpec;
-  mode: 0 | 1 = 0;
+  /** 0 live field, 1 climate result, 2 live match against conditions */
+  mode: 0 | 1 | 2 = 0;
   mix = 0;
   lapse = 0;
   useAlt = 0;
@@ -219,6 +249,10 @@ export class FieldLayer implements CustomLayerInterface {
   private hasA = false;
   private hasB = false;
   private hasResult = false;
+  private hasMatch = false;
+  private mcount = 0;
+  private mranges = new Float32Array(40);
+  private mdoy = 0;
   private ldemExt: [number, number, number, number] = [0, 0, 0, 0];
 
   constructor(id: string) {
@@ -262,6 +296,7 @@ export class FieldLayer implements CustomLayerInterface {
     this.tex.dem = this.makeR8(1, 1, new Uint8Array([0]));
     this.tex.result = this.makeArray(1, 1, 1, new Float32Array([0, 0]));
     this.tex.ldem = this.makeTex2D(1, 1, new Float32Array([0]), 1);
+    this.tex.mfields = this.makeArrayR(1, 1, 1, new Float32Array([0]));
     this.tex.palette = gl.createTexture()!;
   }
 
@@ -315,6 +350,16 @@ export class FieldLayer implements CustomLayerInterface {
     return t;
   }
 
+  private makeArrayR(w: number, h: number, layers: number, data: Float32Array, tex?: WebGLTexture) {
+    const gl = this.gl!;
+    const t = tex ?? gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, t);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R16F, w, h, layers, 0, gl.RED, gl.FLOAT, data);
+    this.setParams(gl.TEXTURE_2D_ARRAY, gl.REPEAT);
+    return t;
+  }
+
   // ---------- public data API ----------
   setDem(w: number, h: number, q: Uint8Array) {
     this.tex.dem = this.makeR8(w, h, q, this.tex.dem);
@@ -361,7 +406,30 @@ export class FieldLayer implements CustomLayerInterface {
   }
 
   get ready() {
-    return this.mode === 0 ? this.hasA && this.hasB : this.hasResult;
+    return this.mode === 0 ? this.hasA && this.hasB : this.mode === 1 ? this.hasResult : this.hasMatch;
+  }
+
+  /** Live fields, one per condition slot (null = computed in the shader, e.g. daylight). */
+  setMatchFields(grid: GridSpec, layers: (Float32Array | null)[]) {
+    this.grid = grid;
+    const n = Math.max(1, layers.length);
+    const size = grid.nx * grid.ny;
+    const data = new Float32Array(size * n);
+    layers.forEach((l, i) => l && data.set(l, i * size));
+    this.tex.mfields = this.makeArrayR(grid.nx, grid.ny, n, data, this.tex.mfields);
+    this.hasMatch = true;
+    this.repaint();
+  }
+
+  /** Per slot: [lo, hi, softness, kind]; ±Infinity bounds are open. Cheap: uniforms only. */
+  setMatchRanges(ranges: [number, number, number, number][], doy: number) {
+    this.mcount = Math.min(10, ranges.length);
+    this.mranges.fill(0);
+    ranges.slice(0, 10).forEach(([lo, hi, soft, kind], i) => {
+      this.mranges.set([Number.isFinite(lo) ? lo : -1e9, Number.isFinite(hi) ? hi : 1e9, soft, kind], i * 4);
+    });
+    this.mdoy = doy;
+    this.repaint();
   }
 
   setClimateGrid(spec: ClimateGridSpec, cellElevPremult: Float32Array) {
@@ -460,6 +528,10 @@ export class FieldLayer implements CustomLayerInterface {
     bind(6, 'result', gl.TEXTURE_2D_ARRAY, 'u_result');
     bind(7, 'cellElev', gl.TEXTURE_2D, 'u_cellElev');
     bind(8, 'ldem', gl.TEXTURE_2D, 'u_ldem');
+    bind(9, 'mfields', gl.TEXTURE_2D_ARRAY, 'u_mfields');
+    gl.uniform1i(p.u.u_mcount, this.mcount);
+    gl.uniform4fv(p.u.u_mrange, this.mranges);
+    gl.uniform1f(p.u.u_mdoy, this.mdoy);
     gl.uniform4f(p.u.u_ldemExt, ...this.ldemExt);
 
     gl.uniform1i(p.u.u_mode, this.mode);

@@ -135,6 +135,17 @@ export const SCORE: Palette = {
   ],
 };
 
+/** "Right now": how well current weather meets the conditions (0..1). */
+export const MATCH: Palette = {
+  stops: [
+    [0, '#86efac', 0],
+    [0.3, '#86efac', 0.12],
+    [0.45, '#4ade80', 0.5],
+    [0.55, '#22c55e', 0.88],
+    [1, '#15803d', 1],
+  ],
+};
+
 function parseColor(c: string): [number, number, number] {
   const h = c.replace('#', '');
   return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];

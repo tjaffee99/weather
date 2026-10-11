@@ -10,7 +10,10 @@ import { decodeGrib2, type GribField } from './grib2';
 const BUCKET = 'https://noaa-gfs-bdp-pds.s3.amazonaws.com';
 const HOUR = 3600_000;
 
-export type LiveVar = 'temp' | 'feels' | 'precip' | 'cloud' | 'wind' | 'snow' | 'humidity' | 'orog' | 'csnow';
+/** Sea temperature value used where there is no sea nearby (below any threshold). */
+export const NO_SEA = -60;
+
+export type LiveVar = 'temp' | 'feels' | 'precip' | 'cloud' | 'wind' | 'snow' | 'humidity' | 'orog' | 'csnow' | 'dew' | 'sst';
 
 /** GRIB parameter + level as written in the .idx inventory */
 const RECORDS: Record<LiveVar, string[]> = {
@@ -23,6 +26,9 @@ const RECORDS: Record<LiveVar, string[]> = {
   snow: ['SNOD:surface'],
   humidity: ['RH:2 m above ground'],
   orog: ['HGT:surface'],
+  dew: ['DPT:2 m above ground'],
+  // skin temperature over water = sea surface temperature; land & ice masks to pick water
+  sst: ['TMP:surface', 'LAND:surface', 'ICEC:surface'],
 };
 
 export interface Cycle {
@@ -92,15 +98,25 @@ export async function fetchField(c: Cycle, fh: number, v: LiveVar, signal?: Abor
     if (i < 0) throw new Error(`${w} missing from GFS f${fh}`);
     hits.push(i);
   }
-  hits.sort((a, b) => a - b);
-  const start = +rows[hits[0]][1];
-  const endRow = rows[hits[hits.length - 1] + 1];
-  const end = endRow ? +endRow[1] - 1 : '';
-  const res = await fetch(fileUrl(c, fh), { headers: { Range: `bytes=${start}-${end}` }, signal });
-  if (!res.ok) throw new Error(`GFS download failed (${res.status})`);
-  const buf = new Uint8Array(await res.arrayBuffer());
-  const fields = decodeGrib2(buf);
-  // keep only the wanted messages (a range may include extra ones in between)
-  if (hits.length === 1) return [fields[0]];
-  return hits.map((h) => fields[h - hits[0]]);
+  // adjacent messages share one range request; distant ones get their own
+  const runs: number[][] = [];
+  for (const h of [...hits].sort((a, b) => a - b)) {
+    const last = runs[runs.length - 1];
+    if (last && h - last[last.length - 1] <= 2) last.push(h);
+    else runs.push([h]);
+  }
+  const byIndex = new Map<number, GribField>();
+  await Promise.all(
+    runs.map(async (run) => {
+      const start = +rows[run[0]][1];
+      const endRow = rows[run[run.length - 1] + 1];
+      const end = endRow ? +endRow[1] - 1 : '';
+      const res = await fetch(fileUrl(c, fh), { headers: { Range: `bytes=${start}-${end}` }, signal });
+      if (!res.ok) throw new Error(`GFS download failed (${res.status})`);
+      const fields = decodeGrib2(new Uint8Array(await res.arrayBuffer()));
+      for (const h of run) byIndex.set(h, fields[h - run[0]]);
+    }),
+  );
+  // in the order the records were requested
+  return hits.map((h) => byIndex.get(h)!);
 }
