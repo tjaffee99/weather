@@ -58,6 +58,8 @@ python3 -m venv .venv && .venv/bin/pip install -r pipeline/requirements.txt
 
 ## Deploy
 
+Live at **https://weather.theojaffee.net** (`public/CNAME`; DNS: `weather` CNAME → `tjaffee99.github.io`).
+
 `.github/workflows/deploy.yml` builds the site and publishes it to GitHub Pages on every push to `main`. To turn it on, go to **Settings → Pages → Build and deployment → Source** and choose **GitHub Actions**. The build uses relative paths, so it works under any sub-path.
 
 ## Data & credits
