@@ -87,34 +87,43 @@ function need(vars: ClimVar[]): Promise<void> {
   ).then(() => undefined);
 }
 
-/** Convert a metric criterion into an inclusive code range for the stored variable. */
-function codeRange(c: Criterion): [number, number] {
+/**
+ * Matching is done per stored code through lookup tables. A linear code c
+ * stands for every value within half a step of c (the encoder rounds), so it
+ * counts with the fraction of that band inside [lo, hi]: narrow ranges, like
+ * a single °F inside a 1 °C step, get their fair share of days instead of
+ * all or nothing. Binned variables (precipitation, wind, snow) match whole
+ * bins; their slider stops are the bin edges.
+ */
+function plainLut(c: Criterion): Float32Array {
   const vm = meta.vars[c.v as ClimVar];
+  const lut = new Float32Array(256);
   if (vm.type === 'bins') {
     const e = vm.edges!;
-    // bin k spans [edge[k-1], edge[k]); bin 0 starts at 0, last bin is open-ended
-    let lo = 0, hi = e.length;
     for (let k = 0; k <= e.length; k++) {
+      // bin k spans [edge[k-1], edge[k]); bin 0 starts at 0, the last bin is open-ended
       const binLo = k === 0 ? 0 : e[k - 1];
-      if (binLo < c.lo - 1e-9) lo = k + 1;
-    }
-    for (let k = e.length; k >= 0; k--) {
       const binHi = k === e.length ? Infinity : e[k];
-      if (binHi > c.hi + 1e-9) hi = k - 1;
+      // whole bins inside the range; "≤ 0" means "none at all", i.e. the first bin
+      if ((binLo >= c.lo - 1e-9 && binHi <= c.hi + 1e-9) || (k === 0 && c.hi < e[0])) lut[k] = 1;
     }
-    // "≤ 0" means "none at all", i.e. the first bin
-    if (c.hi < e[0]) hi = 0;
-    return [lo, hi];
+    return lut;
   }
-  const s = vm.scale!, o = vm.offset!;
-  const lo = (c.lo - o) / s - 1e-6, hi = (c.hi - o) / s + 1e-6;
-  // nodata (0) never matches
-  return [vm.nodata !== undefined ? Math.max(lo, 0.5) : lo, hi];
+  for (let k = 0; k < 256; k++) lut[k] = bandFraction(k * vm.scale! + vm.offset!, vm.scale!, c.lo, c.hi);
+  if (vm.nodata !== undefined) lut[vm.nodata] = 0;
+  return lut;
+}
+
+/** Fraction of the band [v - step/2, v + step/2] that lies within [lo, hi]. */
+function bandFraction(v: number, step: number, lo: number, hi: number): number {
+  const a = Math.max(lo, v - step / 2), b = Math.min(hi, v + step / 2);
+  return b > a ? (b - a) / step : 0;
 }
 
 interface Prepared {
-  plain: { arr: Uint8Array; lo: number; hi: number }[];
-  temps: { arr: Uint8Array; lo: number; hi: number }[]; // in °C, shifted by elevation
+  plain: { arr: Uint8Array; lut: Float32Array }[];
+  /** temperatures, shifted to each elevation level: lut[level * 256 + code] */
+  temps: { arr: Uint8Array; lut: Float32Array; lmin: Int8Array; lmax: Int8Array }[];
   daylight?: [number, number];
 }
 
@@ -127,18 +136,48 @@ function prepare(crit: Criterion[]): Prepared {
     }
     const arr = data[c.v]!;
     if (TEMP_VARS.includes(c.v)) {
-      const o = meta.vars[c.v].offset!;
-      // compare raw codes against bounds expressed in code units
-      p.temps.push({ arr, lo: c.lo - o, hi: c.hi - o });
+      const vm = meta.vars[c.v];
+      const lut = new Float32Array(LEVELS * 256);
+      for (let l = 0; l < LEVELS; l++)
+        for (let k = 0; k < 256; k++) lut[l * 256 + k] = bandFraction(k * vm.scale! + vm.offset! + SHIFTS[l], vm.scale!, c.lo, c.hi);
+      // per code, the span of levels that can match (empty when lmin > lmax)
+      const lmin = new Int8Array(256).fill(LEVELS), lmax = new Int8Array(256).fill(-1);
+      for (let k = 0; k < 256; k++)
+        for (let l = 0; l < LEVELS; l++)
+          if (lut[l * 256 + k] > 0) {
+            lmin[k] = Math.min(lmin[k], l);
+            lmax[k] = Math.max(lmax[k], l);
+          }
+      p.temps.push({ arr, lut, lmin, lmax });
     } else {
-      const [lo, hi] = codeRange(c);
-      p.plain.push({ arr, lo, hi });
+      p.plain.push({ arr, lut: plainLut(c) });
     }
   }
   return p;
 }
 
 const SHIFTS = Array.from({ length: LEVELS }, (_, k) => -LAPSE * (DZ0 + k * DZ_STEP));
+
+/** Weight of day i for the non-temperature conditions (0 = no match). */
+function plainWeight(p: Prepared, i: number, row: number, d: number): number {
+  let w = 1;
+  for (const q of p.plain) {
+    w *= q.lut[q.arr[i]];
+    if (w === 0) return 0;
+  }
+  if (p.daylight) {
+    const h = daylight[row * meta.days + d];
+    if (h < p.daylight[0] || h > p.daylight[1]) return 0;
+  }
+  return w;
+}
+
+/** Weight of day i for the temperature conditions at elevation level l. */
+function tempWeight(p: Prepared, i: number, l: number): number {
+  let w = 1;
+  for (const q of p.temps) w *= q.lut[l * 256 + q.arr[i]];
+  return w;
+}
 
 /**
  * For every cell, accumulate weights of matching days into acc[level*ncells + cell].
@@ -147,9 +186,13 @@ const SHIFTS = Array.from({ length: LEVELS }, (_, k) => -LAPSE * (DZ0 + k * DZ_S
 function accumulate(p: Prepared, weights: Float32Array, acc: Float32Array) {
   const { ncells } = cells;
   const days = meta.days;
-  const plain = p.plain, temps = p.temps;
-  const nP = plain.length, nT = temps.length;
+  // hot loop: everything inlined into locals
+  const pArr = p.plain.map((q) => q.arr), pLut = p.plain.map((q) => q.lut);
+  const tArr = p.temps.map((q) => q.arr), tLut = p.temps.map((q) => q.lut);
+  const tMin = p.temps.map((q) => q.lmin), tMax = p.temps.map((q) => q.lmax);
+  const nP = pArr.length, nT = tArr.length;
   const dl = p.daylight;
+  const codes = new Int32Array(nT);
   const active: number[] = [];
   for (let d = 0; d < days; d++) if (weights[d] > 0) active.push(d);
   for (let c = 0; c < ncells; c++) {
@@ -158,35 +201,28 @@ function accumulate(p: Prepared, weights: Float32Array, acc: Float32Array) {
     for (let ai = 0; ai < active.length; ai++) {
       const d = active[ai];
       const i = base + d;
-      let ok = true;
-      for (let k = 0; k < nP; k++) {
-        const v = plain[k].arr[i];
-        if (v < plain[k].lo || v > plain[k].hi) {
-          ok = false;
-          break;
-        }
-      }
-      if (!ok) continue;
+      let w = weights[d];
+      for (let k = 0; k < nP && w > 0; k++) w *= pLut[k][pArr[k][i]];
+      if (w === 0) continue;
       if (dl) {
         const h = daylight[dlBase + d];
         if (h < dl[0] || h > dl[1]) continue;
       }
-      const w = weights[d];
       if (nT === 0) {
         for (let l = 0; l < LEVELS; l++) acc[l * ncells + c] += w;
         continue;
       }
-      let a = -1e9, b = 1e9;
+      let l0 = 0, l1 = LEVELS - 1;
       for (let k = 0; k < nT; k++) {
-        const t = temps[k].arr[i];
-        const lo = temps[k].lo - t, hi = temps[k].hi - t;
-        if (lo > a) a = lo;
-        if (hi < b) b = hi;
+        const code = (codes[k] = tArr[k][i]);
+        if (tMin[k][code] > l0) l0 = tMin[k][code];
+        if (tMax[k][code] < l1) l1 = tMax[k][code];
       }
-      if (a > b) continue;
-      for (let l = 0; l < LEVELS; l++) {
-        const s = SHIFTS[l];
-        if (s >= a && s <= b) acc[l * ncells + c] += w;
+      for (let l = l0; l <= l1; l++) {
+        const o = l * 256;
+        let t = w;
+        for (let k = 0; k < nT; k++) t *= tLut[k][o + codes[k]];
+        acc[l * ncells + c] += t;
       }
     }
   }
@@ -301,20 +337,9 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
     const m1 = new Float32Array(days);
     for (let d = 0; d < days; d++) {
       const i = c * days + d;
-      let ok = true;
-      for (const q of p.plain) if (q.arr[i] < q.lo || q.arr[i] > q.hi) ok = false;
-      if (ok && p.daylight) {
-        const h = daylight[cellRow[c] * days + d];
-        if (h < p.daylight[0] || h > p.daylight[1]) ok = false;
-      }
-      if (!ok) continue;
-      let ok0 = true, ok1 = true;
-      for (const q of p.temps) {
-        const v = q.arr[i];
-        if (v + SHIFTS[l0] < q.lo || v + SHIFTS[l0] > q.hi) ok0 = false;
-        if (v + SHIFTS[l1] < q.lo || v + SHIFTS[l1] > q.hi) ok1 = false;
-      }
-      m1[d] = (1 - f) * (ok0 ? 1 : 0) + f * (ok1 ? 1 : 0);
+      const pw = plainWeight(p, i, cellRow[c], d);
+      if (pw === 0) continue;
+      m1[d] = pw * ((1 - f) * tempWeight(p, i, l0) + f * tempWeight(p, i, l1));
       match[d] += w * m1[d];
     }
     for (let m = 0; m < 12; m++) {

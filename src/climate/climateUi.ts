@@ -197,8 +197,12 @@ export class ClimateUI {
   }
 
   // ---------- criteria ----------
+  /** The conditions as tested: slider values widened to what they display (see testedRange). */
   private criteria(): Criterion[] {
-    return (Object.entries(this.state) as [CritVar, [number, number]][]).map(([v, [lo, hi]]) => ({ v, lo, hi }));
+    return (Object.entries(this.state) as [CritVar, [number, number]][]).map(([v, r]) => {
+      const [lo, hi] = testedRange(CRITERIA.find((d) => d.v === v)!, r);
+      return { v, lo, hi };
+    });
   }
 
   private setState(s: CritState, preset: string | null) {
@@ -451,6 +455,8 @@ export class ClimateUI {
       min,
       max,
       step,
+      // bin stops are edges: two thumbs on one edge would select no bin at all
+      minGap: def.kind === 'bins' ? 1 : 0,
       value: [toPos(cur[0], 0), toPos(cur[1], 1)],
       label: def.label,
       onInput: (v) => apply(v, false),
@@ -868,12 +874,29 @@ export class ClimateUI {
 }
 
 // ---------- helpers ----------
+/**
+ * The range a condition actually tests. Sliders move in whole display steps,
+ * so "70–70 °F" means any day that rounds to 70 °F: each finite bound is
+ * widened by half a step in the units on screen. Binned conditions
+ * (precipitation, wind, snow) stop on bin edges and are used as they are.
+ */
+function testedRange(def: CritDef, [lo, hi]: [number, number]): [number, number] {
+  if (def.kind === 'bins') return [lo, hi];
+  const step = (units.imperial ? def.imperial! : def.metric!).step;
+  const snap = (v: number) => Math.round(toDisplay(def.q, v) / step) * step;
+  return [
+    Number.isFinite(lo) ? fromDisplay(def.q, snap(lo) - step / 2) : lo,
+    Number.isFinite(hi) ? fromDisplay(def.q, snap(hi) + step / 2) : hi,
+  ];
+}
+
 function describe(def: CritDef, [lo, hi]: [number, number]): string {
   const f = (v: number) => (def.q === 'percent' ? `${Math.round(v)}%` : def.q === 'temp' ? fmt('temp', v) : fmt(def.q, v));
   const u = def.q === 'temp' ? unitLabel('temp').slice(1) : '';
   if (!Number.isFinite(lo) && !Number.isFinite(hi)) return 'any';
   if (!Number.isFinite(lo)) return `≤ ${f(hi)}${u}`;
   if (!Number.isFinite(hi)) return `≥ ${f(lo)}${u}`;
+  if (f(lo) === f(hi)) return `${f(lo)}${u}`;
   if (def.q === 'temp') return `${Math.round(toDisplay('temp', lo))}–${f(hi)}${u}`;
   return `${f(lo)} – ${f(hi)}`;
 }

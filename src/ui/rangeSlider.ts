@@ -14,6 +14,8 @@ export interface RangeSliderOpts {
   onInput: (v: [number, number]) => void;
   onChange?: (v: [number, number]) => void;
   label?: string;
+  /** smallest allowed distance between the thumbs (slider units) */
+  minGap?: number;
 }
 
 type Thumb = 'a' | 'b';
@@ -46,9 +48,9 @@ export class RangeSlider {
     // keyboard (and assistive tech) changes come through the native inputs
     const handler = (final: boolean) => (e: Event) => {
       let lo = +this.a.value, hi = +this.b.value;
-      if (lo > hi) {
-        if (e.target === this.a) this.a.value = String((lo = hi));
-        else this.b.value = String((hi = lo));
+      if (hi - lo < this.gap) {
+        if (e.target === this.a) this.a.value = String((lo = hi - this.gap));
+        else this.b.value = String((hi = lo + this.gap));
       }
       this.raise(e.target === this.a ? 'a' : 'b');
       this.paint();
@@ -64,6 +66,10 @@ export class RangeSlider {
     this.el.addEventListener('pointerup', (e) => this.onUp(e));
     this.el.addEventListener('pointercancel', (e) => this.onUp(e));
     this.paint();
+  }
+
+  private get gap() {
+    return Math.min(this.opts.minGap ?? 0, this.opts.max - this.opts.min);
   }
 
   get value(): [number, number] {
@@ -141,7 +147,7 @@ export class RangeSlider {
   private moveTo(which: Thumb, v: number) {
     const va = +this.a.value, vb = +this.b.value;
     const inp = which === 'a' ? this.a : this.b;
-    const next = which === 'a' ? Math.min(v, vb) : Math.max(v, va);
+    const next = which === 'a' ? Math.min(v, vb - this.gap) : Math.max(v, va + this.gap);
     this.raise(which);
     if (+inp.value === next) return;
     inp.value = String(next);
