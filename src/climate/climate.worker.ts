@@ -199,8 +199,6 @@ function windowWeights(doy: number, half: number): Float32Array {
   return w;
 }
 
-const NICE = [5, 10, 20, 30, 45, 60, 90, 120, 150, 180, 240, 300, 365];
-
 function query(crit: Criterion[], mode: 'days' | 'date', doy: number, half: number) {
   const p = prepare(crit);
   const { ncells, nx, ny } = cells;
@@ -216,20 +214,12 @@ function query(crit: Criterion[], mode: 'days' | 'date', doy: number, half: numb
   }
   accumulate(p, weights, acc);
   for (let i = 0; i < acc.length; i++) acc[i] *= norm;
-  // colour scale: days mode adapts to the distribution so strict filters stay readable
-  let scaleMax = 1;
-  if (mode === 'days') {
-    const mid = acc.subarray(4 * ncells, 5 * ncells);
-    const sorted = Float32Array.from(mid).sort();
-    const p995 = sorted[Math.floor(sorted.length * 0.995)] || 0;
-    scaleMax = NICE.find((n) => n >= p995 * 1.02) ?? 365;
-  }
+  // stored as a fraction of days (0..1) in both modes; the colour scale is fixed
+  const scaleMax = mode === 'days' ? 365 : 1;
   const out = new Float32Array(LEVELS * nx * ny * 2);
   for (let l = 0; l < LEVELS; l++)
     for (let c = 0; c < ncells; c++) {
       const o = ((l * ny + cellRow[c]) * nx + cellCol[c]) * 2;
-      // not clamped: the shader saturates colours above scaleMax, but labels
-      // and the highlight threshold need the real count
       out[o] = acc[l * ncells + c] / scaleMax;
       out[o + 1] = 1;
     }

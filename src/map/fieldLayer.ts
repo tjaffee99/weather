@@ -225,7 +225,9 @@ void main() {
     }
     if (cover < 0.04) discard;
     float v = sv / max(sq, 1e-20);
-    col = shade(v, 0.0);
+    // fixed square-root scale of the fraction of matching days, so a colour
+    // always means the same number of days and rare matches stay visible
+    col = shade(sqrt(max(v, 0.0)), 0.0);
     alpha = smoothstep(0.04, 0.35, cover);
     if (u_cut > 0.0) {
       float keep = smoothstep(u_cut - 0.012, u_cut, v);

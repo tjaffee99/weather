@@ -677,18 +677,18 @@ export class ClimateUI {
       return;
     }
     if (!this.result) return;
+    // fixed square-root scale of the fraction of days (see the shader)
     if (this.result.mode === 'days') {
-      const m = this.result.scaleMax;
-      const ticks = [0, m / 4, m / 2, (3 * m) / 4, m].map((v) => ({ value: v / m, label: `${Math.round(v)}` }));
-      ticks[4].label = m >= 365 ? '365' : `${m}+`;
+      const ticks = [0, 7, 30, 90, 180, 365].map((d) => ({ value: Math.sqrt(d / 365), label: `${d}` }));
       renderLegend(this.els.legend, 'Matching days', 'per year', SCORE, ticks);
     } else {
-      renderLegend(this.els.legend, 'Chance of a matching day', doyLabel(this.result.doy), SCORE, [0, 0.25, 0.5, 0.75, 1].map((v) => ({ value: v, label: `${v * 100}%` })));
+      const ticks = [0, 0.1, 0.25, 0.5, 1].map((p) => ({ value: Math.sqrt(p), label: `${p * 100}%` }));
+      renderLegend(this.els.legend, 'Chance of a matching day', doyLabel(this.result.doy), SCORE, ticks);
     }
     if (this.field.cut > 0) {
       const bar = this.els.legend.querySelector('.legend-bar') as HTMLElement;
       const mk = h('div', { class: 'legend-cut' });
-      mk.style.left = `${Math.min(1, this.field.cut) * 100}%`;
+      mk.style.left = `${Math.sqrt(Math.min(1, this.field.cut)) * 100}%`;
       bar.append(mk);
     }
   }
