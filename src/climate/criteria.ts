@@ -54,6 +54,11 @@ export const CRITERIA: CritDef[] = [
     def: [7, Infinity], // a sunny day for most of the year outside high latitudes
   },
   {
+    v: 'uv', group: 'Sky & air', label: 'UV index', hint: 'Daily peak: 3+ moderate, 6+ high, 8+ very high, 11+ extreme', q: 'index', kind: 'continuous',
+    metric: { min: 0, max: 14, step: 1 }, imperial: { min: 0, max: 14, step: 1 }, file: 'uv',
+    def: [-Infinity, 7], // short of 'very high' (8+), when unprotected skin burns in under 20 minutes
+  },
+  {
     v: 'precip', group: 'Rain & wind', label: 'Precipitation', hint: 'Rain or melted snow per day', q: 'precip', kind: 'bins',
     edges: [0.1, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50, 75, 100, 150], file: 'precip',
     def: [-Infinity, 1], // a dry day (the standard 1 mm wet-day threshold)

@@ -38,7 +38,7 @@ export const units = {
   },
 };
 
-export type Quantity = 'temp' | 'speed' | 'precip' | 'snow' | 'percent' | 'hours' | 'rate' | 'none';
+export type Quantity = 'temp' | 'speed' | 'precip' | 'snow' | 'percent' | 'hours' | 'rate' | 'index' | 'none';
 
 /** metric -> display unit */
 export function toDisplay(q: Quantity, v: number): number {
@@ -117,5 +117,6 @@ export function fmt(q: Quantity, v: number, withUnit = true): string {
     default:
       s = Math.round(d).toString();
   }
-  return withUnit ? `${s}${q === 'percent' ? '' : ' '}${unitLabel(q)}` : s;
+  const u = unitLabel(q);
+  return withUnit && u ? `${s}${q === 'percent' ? '' : ' '}${u}` : s;
 }

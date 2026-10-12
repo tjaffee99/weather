@@ -109,6 +109,26 @@ export const SNOW_DEPTH: Palette = {
 /** Glaciers and ice sheets in the snow-depth view (deeper than any seasonal snow). */
 export const GLACIER = '#5a2ca3';
 
+/** The standard UV index colours (green low, yellow moderate, orange high, red very high, violet extreme); night is clear. */
+export const UV_INDEX: Palette = {
+  stops: [
+    [0, '#4eb400', 0],
+    [0.3, '#4eb400', 0.35],
+    [1, '#4eb400', 0.8],
+    [2, '#a0ce00', 0.9],
+    [3, '#f7e400', 1],
+    [4, '#f8b600', 1],
+    [5, '#f88700', 1],
+    [6, '#f85900', 1],
+    [7, '#e82c0e', 1],
+    [8, '#d8001d', 1],
+    [9, '#ff0099', 1],
+    [10, '#b54cff', 1],
+    [11, '#998cff', 1],
+    [14, '#7d6be0', 1],
+  ],
+};
+
 export const HUMIDITY: Palette = {
   stops: [
     [0, '#8a5a2b'],

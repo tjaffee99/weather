@@ -374,6 +374,7 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
       add(m, 'wind', mean('wind'), w);
       add(m, 'sst', mean('sst'), w);
       add(m, 'sun', mean('sun'), w);
+      add(m, 'uv', mean('uv'), w);
       const pm = mean('precip');
       add(m, 'precip', pm === undefined ? undefined : pm * (b - a), w);
       add(m, 'rainDays', count('precip', (x) => x >= 1), w);

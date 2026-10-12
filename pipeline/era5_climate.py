@@ -115,6 +115,8 @@ def main():
     ap.add_argument("--limit-blocks", type=int, default=0, help="debug: only process N blocks")
     ap.add_argument("--only-sun", action="store_true",
                     help="compute only daily sunshine hours for the same sample days (samples_sun.npz)")
+    ap.add_argument("--only-uv", action="store_true",
+                    help="compute only the daily maximum UV index for the same sample days (samples_uv.npz)")
     args = ap.parse_args()
 
     y0, y1 = (int(x) for x in args.years.split("-"))
@@ -156,6 +158,8 @@ def main():
 
     if args.only_sun:
         return sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs)
+    if args.only_uv:
+        return uv_index(args, years, L, cz, coarse, lat_c, lon_c, offs)
 
     # ---- blocks ----------------------------------------------------------
     nblocks = (365 + L - 1) // L
@@ -361,6 +365,78 @@ def sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs):
             o[(int(d["doy0"]) + k) % 365] = d["sun"][k]
     np.savez(os.path.join(args.work, "samples_sun.npz"), sun=o)
     print("wrote samples_sun.npz")
+
+
+
+# ERA5's surface "UV" (200-440 nm, mostly UV-A) under a clear sky follows
+# 123.6 * mu^1.337 W/m2 (fitted on clear, low-lying hours in four seasons;
+# half of all points within 5%).
+UV_CLEAR_A, UV_CLEAR_B = 123.6, 1.337
+
+
+def uv_index(args, years, L, cz, coarse, lat_c, lon_c, offs):
+    """Daily maximum UV index per local day.
+
+    The UV index weights the shortest, most ozone-sensitive wavelengths, which
+    ERA5 does not report separately. So each hour uses the standard clear-sky
+    UV index for the sun angle and ozone column (Madronich:
+    12.5 * mu^2.42 * (ozone / 300 DU)^-1.23), scaled by ERA5's UV relative to
+    its own clear-sky level, which carries clouds, haze, altitude and snow.
+    """
+    R, C = cz.rows, cz.cols
+    nblocks = (365 + L - 1) // L
+    part_dir = os.path.join(args.work, "parts_uv")
+    os.makedirs(part_dir, exist_ok=True)
+    hours_all = list(range(-12, 24 * L + 13))
+    ozone_hours = [-12 + 24 * k for k in range(L + 2)]
+    loc_h = np.arange(24)
+    pool = ThreadPoolExecutor(args.threads)
+    t_start = time.time()
+    blocks = range(nblocks) if not args.limit_blocks else range(args.limit_blocks)
+    for b in blocks:
+        part = os.path.join(part_dir, f"b{b:03d}.npz")
+        if os.path.exists(part):
+            continue
+        doy0, ndays, year, start = block_start(b, L, years, args)
+        h0 = hidx(start)
+
+        def work(key):
+            var, h = key
+            a = fetch(var, h0 + h)
+            return key, coarse(np.nan_to_num(np.maximum(a, 0), nan=0.0))
+
+        keys = [("downward_uv_radiation_at_the_surface", h) for h in hours_all]
+        keys += [("total_column_ozone", h) for h in ozone_hours]
+        got = dict(pool.map(work, keys))
+        uvi = np.zeros((len(hours_all), R, C), np.float32)
+        for n, h in enumerate(hours_all):
+            t_end = start + dt.timedelta(hours=h)
+            mus = [np.maximum(cos_zenith(t_end - dt.timedelta(minutes=m), lat_c, lon_c), 0)
+                   for m in (7.5, 22.5, 37.5, 52.5)]
+            clear_uvi = np.mean([12.5 * m ** 2.42 for m in mus], axis=0)
+            clear_era = np.mean([UV_CLEAR_A * m ** UV_CLEAR_B for m in mus], axis=0)
+            k = min(L + 1, max(0, round((h + 12) / 24)))
+            ozone_du = np.maximum(got[("total_column_ozone", ozone_hours[k])] / 2.1415e-5, 100)
+            era = got[("downward_uv_radiation_at_the_surface", h)] / 3600.0
+            cmf = np.where(clear_era > 2.0, np.clip(era / np.maximum(clear_era, 1e-6), 0, 1.6), 0)
+            uvi[n] = clear_uvi * (ozone_du / 300.0) ** -1.23 * cmf
+        out = np.zeros((ndays, R, C), np.float32)
+        for d in range(ndays):
+            idx = 24 * d + loc_h[:, None] - offs[None, :] + 12
+            idx = np.broadcast_to(idx[:, None, :], (24, R, C))
+            out[d] = np.take_along_axis(uvi, idx + 1, 0).max(0)
+        np.savez(part, doy0=doy0, year=year, uv=out)
+        print(f"uv block {b+1}/{nblocks} {start:%Y-%m-%d} elapsed={time.time()-t_start:.0f}s", flush=True)
+
+    if args.limit_blocks:
+        return
+    o = np.full((365, R, C), np.nan, np.float32)
+    for b in range(nblocks):
+        d = np.load(os.path.join(part_dir, f"b{b:03d}.npz"))
+        for k in range(d["uv"].shape[0]):
+            o[(int(d["doy0"]) + k) % 365] = d["uv"][k]
+    np.savez(os.path.join(args.work, "samples_uv.npz"), uv=o)
+    print("wrote samples_uv.npz")
 
 
 if __name__ == "__main__":

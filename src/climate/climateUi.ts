@@ -44,6 +44,7 @@ const NOW: Record<CritVar, { v: LiveVar | null; kind: number; soft: number; labe
   snow: { v: 'snow', kind: 0, soft: 1 },
   sst: { v: 'sst', kind: 0, soft: 0.5 },
   sun: { v: 'sun', kind: 0, soft: 0.3, label: 'Sunshine today' },
+  uv: { v: 'uvmax', kind: 0, soft: 0.4, label: 'UV index today' },
   daylight: { v: null, kind: 3, soft: 0.2 },
 };
 
@@ -799,14 +800,14 @@ export class ClimateUI {
         h('h3', {}, 'Monthly climate'),
         normalsTable(res),
       );
-      const missing = (['cloud', 'dew', 'wind', 'snow', 'sst'] as ClimVar[]).filter((v) => !res.loaded.includes(v));
+      const missing = (['cloud', 'dew', 'uv', 'wind', 'snow', 'sst'] as ClimVar[]).filter((v) => !res.loaded.includes(v));
       if (missing.length && this.meta) {
         const mb = missing.reduce((s, v) => s + this.meta!.vars[v].bytes, 0) / 1e6;
         card.append(
           h(
             'button',
             { class: 'chip', style: 'margin-top:10px', onclick: () => this.detail(lon, lat, dem, crit, [...base, ...missing, 'feels', 'tmax', 'tmin', 'precip', 'sun', 'cloud']).then(render) },
-            `+ Clouds, humidity, wind, snow & sea (${mb.toFixed(1)} MB)`,
+            `+ Clouds, humidity, UV, wind, snow & sea (${mb.toFixed(1)} MB)`,
           ),
         );
       }
@@ -984,6 +985,7 @@ function normalsTable(r: DetailResult): HTMLTableElement {
     ['Low', 'Average overnight low', (m) => (m.tmin === undefined ? undefined : fmt('temp', m.tmin))],
     ['Dew pt', 'Average daytime dew point (humidity)', (m) => (m.dew === undefined ? undefined : fmt('temp', m.dew))],
     ['Sun h', 'Average hours of sunshine per day', (m) => (m.sun === undefined ? undefined : m.sun.toFixed(1))],
+    ['UV', 'Average daily peak UV index', (m) => (m.uv === undefined ? undefined : String(Math.round(m.uv)))],
     ['Clear', 'Days with daytime cloud cover ≤ 25%', (m) => (m.sunnyDays === undefined ? undefined : String(Math.round(m.sunnyDays)))],
     ['Rainy', 'Days with ≥ 1 mm of precipitation', (m) => (m.rainDays === undefined ? undefined : String(Math.round(m.rainDays)))],
     [`Precip ${unitLabel('precip')}`, 'Total precipitation in the month', (m) => (m.precip === undefined ? undefined : fmt('precip', m.precip, false))],

@@ -9,7 +9,7 @@ import { HRRR_DOMAINS, type ConicGrid, type HrrrDomain } from './hrrr';
 import type { LiveRequest, LiveResponse } from './live.worker';
 import type { FieldLayer, GridSpec } from '../map/fieldLayer';
 import type { WindParticles } from '../map/windParticles';
-import { CLOUD, HUMIDITY, PRECIP, SNOWFALL, SNOW_DEPTH, TEMPERATURE, WIND, type Palette } from '../map/palettes';
+import { CLOUD, HUMIDITY, PRECIP, SNOWFALL, SNOW_DEPTH, TEMPERATURE, UV_INDEX, WIND, type Palette } from '../map/palettes';
 import { demAt, type City, type Dem } from '../data';
 import { codeFromFields, isDaytime, type Hour, type PointForecast } from './pointForecast';
 import { fmt, type Quantity } from '../units';
@@ -38,6 +38,7 @@ export const LIVE_LAYERS: LayerDef[] = [
   { id: 'feels', label: 'Feels like', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90], variantOf: 'temp' },
   { id: 'precip', label: 'Precipitation', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25], legendImperial: [0.01, 0.05, 0.2, 1] },
   { id: 'cloud', label: 'Clouds', icon: '☁', palette: CLOUD, q: 'percent', lapse: false, legend: [0, 50, 100] },
+  { id: 'uv', label: 'UV index', icon: '🔆', palette: UV_INDEX, q: 'index', lapse: false, legend: [0, 3, 6, 8, 11] },
   { id: 'snow', label: 'Snow depth', icon: '❄', palette: SNOW_DEPTH, q: 'snow', lapse: false, legend: [1, 10, 50, 200], legendImperial: [1, 4, 20, 80] },
   { id: 'wind', label: 'Wind', icon: '🌬', palette: WIND, q: 'speed', lapse: false, legend: [0, 20, 50, 100], legendImperial: [0, 10, 30, 60] },
   { id: 'humidity', label: 'Humidity', icon: '💧', palette: HUMIDITY, q: 'percent', lapse: false, legend: [0, 50, 100] },

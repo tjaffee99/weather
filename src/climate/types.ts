@@ -1,4 +1,4 @@
-export type ClimVar = 'feels' | 'tmax' | 'tmin' | 'dew' | 'sst' | 'cloud' | 'precip' | 'wind' | 'snow' | 'sun';
+export type ClimVar = 'feels' | 'tmax' | 'tmin' | 'dew' | 'sst' | 'cloud' | 'precip' | 'wind' | 'snow' | 'sun' | 'uv';
 export type CritVar = ClimVar | 'daylight';
 
 export interface VarMeta {
@@ -49,6 +49,7 @@ export interface MonthStats {
   wind: number;
   sst: number;
   sun: number; // average hours of sunshine per day
+  uv: number; // average daily peak UV index
   match: number; // matching days per month
 }
 

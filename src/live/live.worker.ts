@@ -33,8 +33,8 @@ self.onmessage = async (e: MessageEvent<LiveRequest>) => {
       (self as unknown as Worker).postMessage(msg, r ? [r.values.buffer] : []);
       return;
     }
-    if (v === 'sun') {
-      const out = await sunshineHours(cycle, fh);
+    if (v === 'sun' || v === 'uv' || v === 'uvmax') {
+      const out = await (v === 'sun' ? sunshineHours(cycle, fh) : v === 'uv' ? uvIndexAt(cycle, fh) : uvIndexPeak(cycle, fh));
       (self as unknown as Worker).postMessage({ id, values: out, nx: 1440, ny: 721 } satisfies LiveResponse, [out.buffer]);
       return;
     }
@@ -147,15 +147,7 @@ function sunUpHours(t0: number, hours: number, out: Float32Array) {
     cosLat[r] = Math.cos(phi);
   }
   for (let s = 0; s < hours / STEP; s++) {
-    const t = new Date(t0 + (s + 0.5) * STEP * 3600_000);
-    const utcH = t.getUTCHours() + t.getUTCMinutes() / 60 + t.getUTCSeconds() / 3600;
-    const doy = (Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - Date.UTC(t.getUTCFullYear(), 0, 1)) / 86400_000 + 1;
-    // NOAA solar position approximations
-    const g = ((2 * Math.PI) / 365) * (doy - 1 + (utcH - 12) / 24);
-    const eqt = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
-    const decl =
-      0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) +
-      0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+    const { utcH, eqt, decl } = solar(t0 + (s + 0.5) * STEP * 3600_000);
     const sd = Math.sin(decl), cd = Math.cos(decl);
     for (let c = 0; c < NX; c++) cosH[c] = Math.cos((((utcH * 60 + eqt + 4 * c * 0.25) / 4 - 180) * Math.PI) / 180);
     for (let r = 0; r < NY; r++) {
@@ -170,4 +162,80 @@ function sunUpHours(t0: number, hours: number, out: Float32Array) {
       for (let c = 0; c < NX; c++) if (a + b * cosH[c] >= minSin) out[row + c] += STEP;
     }
   }
+}
+
+/** NOAA solar position approximations: UTC hour, equation of time (min), declination (rad). */
+function solar(ms: number) {
+  const t = new Date(ms);
+  const utcH = t.getUTCHours() + t.getUTCMinutes() / 60 + t.getUTCSeconds() / 3600;
+  const doy = (Date.UTC(t.getUTCFullYear(), t.getUTCMonth(), t.getUTCDate()) - Date.UTC(t.getUTCFullYear(), 0, 1)) / 86400_000 + 1;
+  const g = ((2 * Math.PI) / 365) * (doy - 1 + (utcH - 12) / 24);
+  const eqt = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const decl =
+    0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) +
+    0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  return { utcH, eqt, decl };
+}
+
+/**
+ * Clear-sky UV index for a sun height (cosine of the zenith angle) and ozone
+ * column (Dobson units), after Madronich (2007): 12.5 mu^2.42 (ozone/300)^-1.23.
+ */
+function clearUvIndex(mu: number, ozoneDu: number): number {
+  return mu > 0 ? 12.5 * Math.pow(mu, 2.42) * Math.pow(Math.max(ozoneDu, 100) / 300, -1.23) : 0;
+}
+
+/** Cloud (and haze) effect on UV: GFS all-sky over clear-sky UV-B. */
+function uvCloudFactor(all: number, clear: number): number {
+  return clear > 0.01 ? Math.min(1.2, Math.max(0, all / clear)) : 1;
+}
+
+/** UV index at the forecast hour: clear-sky value for the sun's height, times the cloud factor. */
+async function uvIndexAt(cycle: Cycle, fh: number): Promise<Float32Array> {
+  // averages start at f001; the analysis has none
+  const [[all, clear], [oz]] = await Promise.all([fetchField(cycle, Math.max(1, fh), 'uvb'), fetchField(cycle, fh, 'ozone')]);
+  const NX = 1440, NY = 721;
+  const out = new Float32Array(NX * NY);
+  const { utcH, eqt, decl } = solar(cycle.time + fh * 3600_000);
+  const sd = Math.sin(decl), cd = Math.cos(decl);
+  const cosH = new Float64Array(NX);
+  for (let c = 0; c < NX; c++) cosH[c] = Math.cos((((utcH * 60 + eqt + c) / 4 - 180) * Math.PI) / 180); // 4 min per 0.25° column
+  for (let r = 0; r < NY; r++) {
+    const phi = ((90 - r * 0.25) * Math.PI) / 180;
+    const a = Math.sin(phi) * sd, b = Math.cos(phi) * cd;
+    for (let c = 0; c < NX; c++) {
+      const i = r * NX + c;
+      const mu = a + b * cosH[c];
+      if (mu > 0) out[i] = clearUvIndex(mu, oz.values[i]) * uvCloudFactor(all.values[i], clear.values[i]);
+    }
+  }
+  return out;
+}
+
+/**
+ * Peak UV index over the 24 h around forecast hour fh: the clear-sky value
+ * with the sun at its highest (local noon), times the day's cloud factor
+ * (all-sky over clear-sky UV-B summed over the four 6-hour averages).
+ */
+async function uvIndexPeak(cycle: Cycle, fh: number): Promise<Float32Array> {
+  const start = Math.min(96, Math.max(0, Math.round((fh - 12) / 6) * 6));
+  const ends = [start + 6, start + 12, start + 18, start + 24];
+  const [parts, [oz]] = await Promise.all([Promise.all(ends.map((e) => fetchField(cycle, e, 'uvb'))), fetchField(cycle, fh, 'ozone')]);
+  const NX = 1440, NY = 721;
+  const out = new Float32Array(NX * NY);
+  const { decl } = solar(cycle.time + fh * 3600_000);
+  for (let r = 0; r < NY; r++) {
+    const phi = ((90 - r * 0.25) * Math.PI) / 180;
+    const muNoon = Math.cos(phi - decl);
+    for (let c = 0; c < NX; c++) {
+      const i = r * NX + c;
+      let all = 0, clear = 0;
+      for (const [a, b] of parts) {
+        all += a.values[i];
+        clear += b.values[i];
+      }
+      out[i] = clearUvIndex(muNoon, oz.values[i]) * uvCloudFactor(all, clear);
+    }
+  }
+  return out;
 }

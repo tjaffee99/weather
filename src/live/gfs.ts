@@ -13,7 +13,9 @@ const HOUR = 3600_000;
 /** Sea temperature value used where there is no sea nearby (below any threshold). */
 export const NO_SEA = -60;
 
-export type LiveVar = 'temp' | 'feels' | 'precip' | 'cloud' | 'wind' | 'snow' | 'humidity' | 'orog' | 'csnow' | 'dew' | 'sst' | 'sunsd' | 'sun';
+export type LiveVar =
+  | 'temp' | 'feels' | 'precip' | 'cloud' | 'wind' | 'snow' | 'humidity' | 'orog' | 'csnow' | 'dew' | 'sst'
+  | 'sunsd' | 'sun' | 'uvb' | 'ozone' | 'uv' | 'uvmax';
 
 /** GRIB parameter + level as written in the .idx inventory */
 const RECORDS: Record<LiveVar, string[]> = {
@@ -32,6 +34,11 @@ const RECORDS: Record<LiveVar, string[]> = {
   // sunshine duration (s), accumulated since the last 6-hourly reset
   sunsd: ['SUNSD:surface'],
   sun: [], // derived: see sunshineHours in live.worker.ts
+  // all-sky and clear-sky UV-B, averaged since the last 6-hourly reset ("b:" = pgrb2b file)
+  uvb: ['b:DUVB:surface', 'b:CDUVB:surface'],
+  ozone: ['TOZNE:entire atmosphere (considered as a single layer)'],
+  uv: [], // derived: UV index at the hour (live.worker.ts)
+  uvmax: [], // derived: peak UV index over the day (live.worker.ts)
 };
 
 export interface Cycle {
@@ -42,9 +49,9 @@ export interface Cycle {
 
 const idxCache = new Map<string, Promise<string[][] | null>>();
 
-function fileUrl(c: Cycle, fh: number) {
+function fileUrl(c: Cycle, fh: number, b = false) {
   const hh = String(c.hour).padStart(2, '0');
-  return `${BUCKET}/gfs.${c.date}/${hh}/atmos/gfs.t${hh}z.pgrb2.0p25.f${String(fh).padStart(3, '0')}`;
+  return `${BUCKET}/gfs.${c.date}/${hh}/atmos/gfs.t${hh}z.pgrb2${b ? 'b' : ''}.0p25.f${String(fh).padStart(3, '0')}`;
 }
 
 function cycleAt(t: number): Cycle {
@@ -53,8 +60,8 @@ function cycleAt(t: number): Cycle {
   return { date, hour: d.getUTCHours(), time: t };
 }
 
-async function loadIdx(c: Cycle, fh: number): Promise<string[][] | null> {
-  const url = fileUrl(c, fh) + '.idx';
+async function loadIdx(c: Cycle, fh: number, b = false): Promise<string[][] | null> {
+  const url = fileUrl(c, fh, b) + '.idx';
   let p = idxCache.get(url);
   if (!p) {
     p = fetch(url, { cache: 'no-cache' })
@@ -90,14 +97,19 @@ export function forecastHour(c: Cycle, validTime: number) {
 
 /** Fetch & decode the GRIB messages of one variable at one forecast hour. */
 export async function fetchField(c: Cycle, fh: number, v: LiveVar, signal?: AbortSignal): Promise<GribField[]> {
-  const rows = await loadIdx(c, fh);
+  // all records of one variable live in the same file: pgrb2, or pgrb2b when prefixed "b:"
+  const b = RECORDS[v][0]?.startsWith('b:') ?? false;
+  const rows = await loadIdx(c, fh, b);
   if (!rows) throw new Error(`GFS f${fh} not available`);
   const fc = fh === 0 ? 'anl' : `${fh} hour fcst`;
-  const wanted = RECORDS[v];
+  const ave = `-${fh} hour ave fcst`; // averages end at this hour
+  const wanted = RECORDS[v].map((w) => w.replace(/^b:/, ''));
   // locate the messages; consecutive ones are merged into one range request
   const hits: number[] = [];
   for (const w of wanted) {
-    const i = rows.findIndex((r) => `${r[3]}:${r[4]}` === w && r[5] === fc);
+    // the instantaneous record if there is one, else the average ending at this hour
+    let i = rows.findIndex((r) => `${r[3]}:${r[4]}` === w && r[5] === fc);
+    if (i < 0) i = rows.findIndex((r) => `${r[3]}:${r[4]}` === w && r[5].endsWith(ave));
     if (i < 0) throw new Error(`${w} missing from GFS f${fh}`);
     hits.push(i);
   }
@@ -114,7 +126,7 @@ export async function fetchField(c: Cycle, fh: number, v: LiveVar, signal?: Abor
       const start = +rows[run[0]][1];
       const endRow = rows[run[run.length - 1] + 1];
       const end = endRow ? +endRow[1] - 1 : '';
-      const res = await fetch(fileUrl(c, fh), { headers: { Range: `bytes=${start}-${end}` }, signal });
+      const res = await fetch(fileUrl(c, fh, b), { headers: { Range: `bytes=${start}-${end}` }, signal });
       if (!res.ok) throw new Error(`GFS download failed (${res.status})`);
       const fields = decodeGrib2(new Uint8Array(await res.arrayBuffer()));
       for (const h of run) byIndex.set(h, fields[h - run[0]]);

@@ -40,6 +40,8 @@ VARS = {
     "snow": ("snow", {"type": "bins", "edges": SNOW_EDGES}),
     # hours of sunshine per day (WMO: direct normal irradiance >= 120 W/m2), half-hour steps
     "sun": ("sun", {"type": "linear", "scale": 0.5, "offset": 0.0}),
+    # daily peak UV index, half-unit steps
+    "uv": ("uv", {"type": "linear", "scale": 0.5, "offset": 0.0}),
 }
 BLOCK = 3
 # ERA5 rains lightly far too often ("drizzle bias"): days with >= 1 mm are
@@ -117,6 +119,9 @@ def main():
     sun_path = os.path.join(a.work, "samples_sun.npz")
     if os.path.exists(sun_path):  # produced by era5_climate.py --only-sun
         smp["sun"] = np.load(sun_path)["sun"]
+    uv_path = os.path.join(a.work, "samples_uv.npz")
+    if os.path.exists(uv_path):  # produced by era5_climate.py --only-uv
+        smp["uv"] = np.load(uv_path)["uv"]
     land, elev, lat, lon = st["land"], st["elev"], st["lat"], st["lon"]
     R, C = land.shape
     mask = land > a.min_land
