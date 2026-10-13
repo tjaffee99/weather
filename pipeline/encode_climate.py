@@ -192,12 +192,26 @@ def main():
     print(f"cells {ncells}, total {total/1e6:.2f} MB")
 
 
+# monthly normals: triangle windows round mid-month (mirrors monthWeights() in src/climate/types.ts)
+MONTH_NARROW, MONTH_WIDE = 30.4, 45.0
+
+
+def month_weights(m: int, half: float, days: int = 365) -> np.ndarray:
+    mid = (MONTH_START[m] + MONTH_START[m + 1]) / 2
+    dist = np.abs((np.arange(days) + 0.5 - mid + days / 2) % days - days / 2)
+    w = np.clip(1 - dist / half, 0, None)
+    return w / w.sum()
+
+
 def atlas(smp: dict, mask: np.ndarray, out: str) -> dict:
     """Monthly and annual normals per cell, from the raw (unquantised) daily samples.
 
     Each file is int16 [13][ncells] (Jan..Dec, then the year), value = stored * scale,
     -32768 where there is no data (sea temperature inland). "mean" variables are
     averaged over the period, "sum" variables added up over it (hours, mm, days).
+    The sample has about one real day per calendar date, so months are taken
+    over smoothed windows (month_weights): narrow for temperature and sun,
+    wider for noisy day-to-day quantities like rain, cloud and snow.
     """
     os.makedirs(out, exist_ok=True)
     days = smp["tmax"].shape[0]
@@ -221,6 +235,7 @@ def atlas(smp: dict, mask: np.ndarray, out: str) -> dict:
         "aqi": ("mean", 0.1, lambda: smp["aqi"]),
         "goodair": ("sum", 0.1, lambda: (smp["aqi"] <= 50).astype(np.float32)),
     }
+    narrow = {"tmean", "tmax", "tmin", "feels", "dew", "sst", "sun", "uv"}
     needs = {"sun": "sun", "uv": "uv", "snowfall": "snowfall", "rh": "rh", "aqi": "aqi", "goodair": "aqi"}
     meta = {}
     for vid, (kind, scale, get) in defs.items():
@@ -228,13 +243,16 @@ def atlas(smp: dict, mask: np.ndarray, out: str) -> dict:
             print(f"atlas: skipping {vid}")
             continue
         x = get().astype(np.float64)[:, mask]  # (days, ncells)
+        valid = ~np.isnan(x)
+        x0 = np.where(valid, x, 0)
         periods = []
         for m in range(13):
-            sl = slice(0, days) if m == 12 else slice(MONTH_START[m], MONTH_START[m + 1])
-            with np.errstate(invalid="ignore"):
-                v = np.nansum(x[sl], 0) if kind == "sum" else np.nanmean(x[sl], 0)
-            if kind == "mean":
-                v = np.where(np.isnan(x[sl]).all(0), np.nan, v)
+            w = np.ones(days) if m == 12 else month_weights(m, MONTH_NARROW if vid in narrow else MONTH_WIDE, days)
+            ws = w @ valid
+            with np.errstate(invalid="ignore", divide="ignore"):
+                v = np.where(ws > 0, (w @ x0) / ws, np.nan)  # weighted mean of the valid days
+            if kind == "sum":
+                v = v * (days if m == 12 else MONTH_START[m + 1] - MONTH_START[m])
             periods.append(v)
         q = np.stack(periods) / scale
         q = np.where(np.isnan(q), -32768, np.clip(np.round(q), -32767, 32767)).astype("<i2")

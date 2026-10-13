@@ -3,3 +3,4 @@ numcodecs>=0.13
 requests>=2.31
 pillow>=10
 pyshp>=2.3
+eccodes>=2.0  # gefs_aq.py only (GRIB2 decoding)

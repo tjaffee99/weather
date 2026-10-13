@@ -66,8 +66,8 @@ const utcDoy = (t: number) => {
 
 export class ClimateUI {
   private worker: Worker;
-  private meta?: ClimateMeta;
-  private ready: Promise<void>;
+  meta?: ClimateMeta;
+  readonly ready: Promise<void>;
   private mode: Mode = 'days';
   private state: CritState;
   private preset: string | null = 'perfect';
@@ -76,7 +76,7 @@ export class ClimateUI {
   private inflight = false;
   private dirty = false;
   private result?: { data: Float32Array; scaleMax: number; mode: Mode; doy: number };
-  private cellElevTex?: Float32Array;
+  cellElevTex?: Float32Array;
   private pending = new Map<number, (m: any) => void>(); // eslint-disable-line @typescript-eslint/no-explicit-any
   private progress = new Map<string, [number, number]>();
   private playing = 0;
@@ -167,6 +167,7 @@ export class ClimateUI {
     this.active = true;
     this.field.fade = 0;
     this.field.mode = 1;
+    this.field.climateSqrt = true;
     this.field.lapse = 0;
     this.field.useAlt = 0;
     this.field.opacity = 1;
@@ -240,6 +241,7 @@ export class ClimateUI {
         if (this.mode !== mode) return;
         if (this.lastMode !== mode) this.field.setPalette(SCORE);
         this.field.mode = 1;
+        this.field.climateSqrt = true;
         this.field.setClimateResult(m.data);
         this.applyCut();
         if (this.field.fade < 1 && this.lastMode !== mode) this.field.fadeTo(1, 280);

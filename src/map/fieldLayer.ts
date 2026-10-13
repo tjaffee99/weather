@@ -68,6 +68,7 @@ uniform float u_snowH;         // live snow depth: terrain scale height (m), 0 =
 uniform float u_useAlt;
 uniform float u_opacity;
 uniform float u_cut;           // climate: values below are dimmed
+uniform float u_csqrt;         // climate: 1 = square-root scale (fraction of days), 0 = values as they are (atlas)
 
 const float PI = 3.141592653589793;
 
@@ -211,6 +212,8 @@ void main() {
         int xx = int(mod(i0.x + float(i - 1), u_cgridSize.x));
         vec2 ce = texelFetch(u_cellElev, ivec2(xx, yy), 0).rg;
         if (ce.y < 0.5) continue;
+        // cells without a value (e.g. sea temperature inland) leave a gap
+        if (texelFetch(u_result, ivec3(xx, yy, 0), 0).g < 0.5) continue;
         float w = wx[i] * wy[j];
         cover += w;
         float want = (z - ce.x - u_levels.y) / u_levels.z;
@@ -225,9 +228,9 @@ void main() {
     }
     if (cover < 0.04) discard;
     float v = sv / max(sq, 1e-20);
-    // fixed square-root scale of the fraction of matching days, so a colour
-    // always means the same number of days and rare matches stay visible
-    col = shade(sqrt(max(v, 0.0)), 0.0);
+    // finder: fixed square-root scale of the fraction of matching days, so a
+    // colour always means the same number of days and rare matches stay visible
+    col = shade(u_csqrt > 0.5 ? sqrt(max(v, 0.0)) : v, 0.0);
     alpha = smoothstep(0.04, 0.35, cover);
     if (u_cut > 0.0) {
       float keep = smoothstep(u_cut - 0.012, u_cut, v);
@@ -265,7 +268,7 @@ const UNIFORMS = [
   'u_projection_transition', 'u_projection_fallback_matrix', 'u_offset',
   'u_mode', 'u_fieldA', 'u_fieldB', 'u_alt', 'u_orog', 'u_dem', 'u_palette', 'u_result', 'u_cellElev',
   'u_grid', 'u_gridSize', 'u_cgrid', 'u_cgridSize', 'u_levels', 'u_mix', 'u_domain', 'u_log',
-  'u_lapse', 'u_snowH', 'u_useAlt', 'u_opacity', 'u_cut', 'u_ldem', 'u_ldemExt',
+  'u_lapse', 'u_snowH', 'u_useAlt', 'u_opacity', 'u_cut', 'u_csqrt', 'u_ldem', 'u_ldemExt',
   'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy', 'u_reg0', 'u_reg1', 'u_rcone', 'u_rgrid',
 ];
 
@@ -291,6 +294,8 @@ export class FieldLayer implements CustomLayerInterface {
   lapse = 0;
   /** live snow depth: terrain scale height in metres (0 = off) */
   snowH = 0;
+  /** climate mode: show the square root of the result (finder) or the values themselves (atlas) */
+  climateSqrt = true;
   useAlt = 0;
   opacity = 1;
   /** climate mode: normalised value below which results are dimmed (0 = off) */
@@ -631,6 +636,7 @@ export class FieldLayer implements CustomLayerInterface {
     gl.uniform1f(p.u.u_useAlt, this.useAlt);
     gl.uniform1f(p.u.u_opacity, this.opacity * this.fade);
     gl.uniform1f(p.u.u_cut, this.mode === 1 ? this.cut : 0);
+    gl.uniform1f(p.u.u_csqrt, this.climateSqrt ? 1 : 0);
 
     if (!this.vao) {
       this.vao = gl.createVertexArray()!;

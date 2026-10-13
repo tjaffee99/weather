@@ -9,7 +9,7 @@
  */
 import { fetchBinary } from '../data';
 import { decodeVar, parseCells, checksum, type CellsInfo } from './codec';
-import { DZ0, DZ_STEP, LAPSE, LEVELS, type ClimVar, type ClimateMeta, type Criterion, type DetailResult, type MonthStats, type Obstacle, type CritVar } from './types';
+import { DZ0, DZ_STEP, LAPSE, LEVELS, MONTH_NARROW, MONTH_START, MONTH_WIDE, monthWeights, type ClimVar, type ClimateMeta, type Criterion, type DetailResult, type MonthStats, type Obstacle, type CritVar } from './types';
 import { blendTaps, levelOf } from './blend';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -24,7 +24,6 @@ let daylight: Float32Array; // [row * days + d]
 const data: Partial<Record<ClimVar, Uint8Array>> = {};
 const loading: Partial<Record<ClimVar, Promise<void>>> = {};
 const TEMP_VARS: ClimVar[] = ['feels', 'tmax', 'tmin'];
-const MONTH_START = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365];
 
 function post(msg: unknown, transfer: Transferable[] = []) {
   ctx.postMessage(msg, transfer);
@@ -315,6 +314,16 @@ function nearestCell(lon: number, lat: number): number {
   return best;
 }
 
+let kernels: { narrow: Float64Array[]; wide: Float64Array[] } | undefined;
+function monthKernels(days: number) {
+  if (!kernels || kernels.narrow[0].length !== days)
+    kernels = {
+      narrow: Array.from({ length: 12 }, (_, m) => monthWeights(m, MONTH_NARROW, days)),
+      wide: Array.from({ length: 12 }, (_, m) => monthWeights(m, MONTH_WIDE, days)),
+    };
+  return kernels;
+}
+
 function decodeValue(v: ClimVar, code: number): number {
   const vm = meta.vars[v];
   if (vm.type === 'linear') return code * vm.scale! + vm.offset!;
@@ -381,46 +390,53 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
       m1[d] = pw * ((1 - f) * tempWeight(p, i, l0) + f * tempWeight(p, i, l1));
       match[d] += w * m1[d];
     }
+    // monthly normals over smoothed month windows (see monthWeights), as in the atlas
+    const K = monthKernels(days);
     for (let m = 0; m < 12; m++) {
-      const a = MONTH_START[m], b = MONTH_START[m + 1];
-      const mean = (v: ClimVar, sh = 0) => {
+      const n = MONTH_START[m + 1] - MONTH_START[m];
+      const narrow = K.narrow[m], wide = K.wide[m];
+      const mean = (v: ClimVar, k: Float64Array, sh = 0) => {
         const arr = data[v];
         if (!arr) return undefined;
-        let s = 0, k = 0;
-        for (let d = a; d < b; d++) {
+        const nodata = meta.vars[v].nodata;
+        let s = 0, ws = 0;
+        for (let d = 0; d < days; d++) {
+          const kd = k[d];
+          if (!kd) continue;
           const code = arr[c * days + d];
-          if (meta.vars[v].nodata !== undefined && code === meta.vars[v].nodata) continue;
-          s += decodeValue(v, code) + sh;
-          k++;
+          if (nodata !== undefined && code === nodata) continue;
+          s += kd * (decodeValue(v, code) + sh);
+          ws += kd;
         }
-        return k ? s / k : undefined;
+        return ws ? s / ws : undefined;
       };
+      /** expected days in the month for which f holds */
       const count = (v: ClimVar, f: (x: number) => boolean) => {
         const arr = data[v];
         if (!arr) return undefined;
-        let k = 0;
-        for (let d = a; d < b; d++) if (f(decodeValue(v, arr[c * days + d]))) k++;
-        return k;
+        let s = 0;
+        for (let d = 0; d < days; d++) if (wide[d] && f(decodeValue(v, arr[c * days + d]))) s += wide[d];
+        return s * n;
       };
       let mt = 0;
-      for (let d = a; d < b; d++) mt += m1[d];
-      add(m, 'match', mt, w);
-      add(m, 'feels', mean('feels', shift), w);
-      add(m, 'tmax', mean('tmax', shift), w);
-      add(m, 'tmin', mean('tmin', shift), w);
-      add(m, 'dew', mean('dew'), w);
-      add(m, 'cloud', mean('cloud'), w);
-      add(m, 'wind', mean('wind'), w);
-      add(m, 'sst', mean('sst'), w);
-      add(m, 'sun', mean('sun'), w);
-      add(m, 'uv', mean('uv'), w);
-      add(m, 'rh', mean('rh'), w);
-      add(m, 'aqi', mean('aqi'), w);
+      for (let d = 0; d < days; d++) mt += narrow[d] * m1[d];
+      add(m, 'match', mt * n, w);
+      add(m, 'feels', mean('feels', narrow, shift), w);
+      add(m, 'tmax', mean('tmax', narrow, shift), w);
+      add(m, 'tmin', mean('tmin', narrow, shift), w);
+      add(m, 'dew', mean('dew', narrow), w);
+      add(m, 'sst', mean('sst', narrow), w);
+      add(m, 'sun', mean('sun', narrow), w);
+      add(m, 'uv', mean('uv', narrow), w);
+      add(m, 'cloud', mean('cloud', wide), w);
+      add(m, 'wind', mean('wind', wide), w);
+      add(m, 'rh', mean('rh', wide), w);
+      add(m, 'aqi', mean('aqi', wide), w);
       add(m, 'goodAirDays', count('aqi', (x) => x <= 50), w);
-      const sf = mean('snowfall');
-      add(m, 'snowfall', sf === undefined ? undefined : sf * (b - a), w);
-      const pm = mean('precip');
-      add(m, 'precip', pm === undefined ? undefined : pm * (b - a), w);
+      const sf = mean('snowfall', wide);
+      add(m, 'snowfall', sf === undefined ? undefined : sf * n, w);
+      const pm = mean('precip', wide);
+      add(m, 'precip', pm === undefined ? undefined : pm * n, w);
       add(m, 'rainDays', count('precip', (x) => x >= 1), w);
       add(m, 'sunnyDays', count('cloud', (x) => x <= 25), w);
       add(m, 'snowDays', count('snow', (x) => x >= 1), w);

@@ -268,6 +268,26 @@ button {
   border-radius: 3px;
   opacity: 0.85;
 }
+.layer-btn.compact {
+  padding: 6px 10px;
+}
+.atlas-list {
+  gap: 2px;
+}
+.atlas-list .menu-group:not(:first-child) {
+  padding-top: 10px;
+}
+.seg.period-seg {
+  margin-left: 0;
+}
+.seg.period-seg button {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+}
+.seg.period-seg button:first-child {
+  flex: 2;
+}
 .seg.layer-variant {
   margin: 0 0 4px 46px;
 }

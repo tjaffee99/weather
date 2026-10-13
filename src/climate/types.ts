@@ -22,6 +22,8 @@ export interface ClimateMeta {
   ncells: number;
   sampleYears: number[];
   vars: Record<ClimVar, VarMeta>;
+  /** atlas normals: int16 [13][ncells] (Jan..Dec, year) per variable */
+  atlas?: Record<string, { file: string; kind: 'mean' | 'sum'; scale: number; bytes: number }>;
 }
 
 /** A criterion in metric units; bounds may be +-Infinity. */
@@ -35,6 +37,32 @@ export const LEVELS = 9;
 export const DZ0 = -2000;
 export const DZ_STEP = 500;
 export const LAPSE = 0.0065;
+
+export const MONTH_START = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365];
+/** Kernel half-widths (days) for monthly normals: steady quantities, and noisy day-to-day ones. */
+export const MONTH_NARROW = 30.4;
+export const MONTH_WIDE = 45;
+
+/**
+ * Month m's weights over the 365 sampled days (summing to 1): a triangle
+ * centred mid-month reaching `half` days to either side, wrapping round the
+ * year. The sample holds about one real day per calendar date, so a plain
+ * calendar month is only ~30 days of weather; borrowing from the neighbouring
+ * weeks steadies rain, cloud and snow statistics at little cost in seasonal
+ * detail. Mirrored by month_weights() in pipeline/encode_climate.py.
+ */
+export function monthWeights(m: number, half: number, days = 365): Float64Array {
+  const mid = (MONTH_START[m] + MONTH_START[m + 1]) / 2;
+  const w = new Float64Array(days);
+  let s = 0;
+  for (let d = 0; d < days; d++) {
+    const dist = Math.abs((((d + 0.5 - mid + days / 2) % days) + days) % days - days / 2);
+    w[d] = Math.max(0, 1 - dist / half);
+    s += w[d];
+  }
+  for (let d = 0; d < days; d++) w[d] /= s;
+  return w;
+}
 
 export interface MonthStats {
   feels: number;

@@ -13,9 +13,10 @@ import { LiveUI } from './live/liveUi';
 import { $, h, clear } from './ui/dom';
 import { units } from './units';
 import { ClimateUI } from './climate/climateUi';
+import { AtlasUI } from './climate/atlasUi';
 
 const BASE = import.meta.env.BASE_URL;
-type Mode = 'climate' | 'live';
+type Mode = 'climate' | 'atlas' | 'live';
 
 const els = {
   panel: $('#panel'),
@@ -62,7 +63,7 @@ map.addControl(
   new maplibregl.AttributionControl({
     compact: true,
     customAttribution:
-      'Map forecast: <a href="https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast">NOAA GFS</a> · Point forecasts: <a href="https://open-meteo.com/">Open-Meteo</a> · Places: <a href="https://nominatim.org/">Nominatim</a> · Climate: <a href="https://cds.climate.copernicus.eu/">Copernicus ERA5</a> via <a href="https://github.com/google-research/arco-era5">ARCO-ERA5</a> · <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://www.naturalearthdata.com/">Natural Earth</a>',
+      'Map forecast: <a href="https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast">NOAA GFS</a>, <a href="https://rapidrefresh.noaa.gov/hrrr/">HRRR</a> and <a href="https://registry.opendata.aws/noaa-gefs/">GEFS-Aerosols</a> · Radar: <a href="https://www.rainviewer.com/">RainViewer</a> · Satellite: <a href="https://view.eumetsat.int/">EUMETSAT</a> · Air quality: <a href="https://open-meteo.com/en/docs/air-quality-api">CAMS via Open-Meteo</a> · Point forecasts: <a href="https://open-meteo.com/">Open-Meteo</a> · Places: <a href="https://nominatim.org/">Nominatim</a> · Climate: <a href="https://cds.climate.copernicus.eu/">Copernicus ERA5</a> via <a href="https://github.com/google-research/arco-era5">ARCO-ERA5</a> · <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://www.naturalearthdata.com/">Natural Earth</a>',
   }),
   'bottom-right',
 );
@@ -75,6 +76,7 @@ let mode: Mode | null = null;
 let live: LiveController;
 let liveUi: LiveUI;
 let climateUi: ClimateUI;
+let atlasUi: AtlasUI;
 let liveReadyResolve: () => void = () => {};
 const liveReady = new Promise<void>((r) => (liveReadyResolve = r));
 let cities: City[] = [];
@@ -142,6 +144,7 @@ async function setMode(m: Mode) {
     liveUi.exit();
   }
   if (prev === 'climate') climateUi.exit();
+  if (prev === 'atlas') atlasUi.exit();
   setWaterForMode(m);
   updateUrlMode();
   if (m === 'live') {
@@ -151,6 +154,8 @@ async function setMode(m: Mode) {
     live.activate();
     liveUi.enter();
     live.updateCities();
+  } else if (m === 'atlas') {
+    await atlasUi.enter();
   } else {
     await climateUi.enter();
   }
@@ -158,7 +163,7 @@ async function setMode(m: Mode) {
 
 function updateUrlMode() {
   const u = new URL(location.href);
-  if (mode === 'live') u.searchParams.set('mode', 'live');
+  if (mode === 'live' || mode === 'atlas') u.searchParams.set('mode', mode);
   else u.searchParams.delete('mode');
   history.replaceState(null, '', u);
 }
@@ -172,6 +177,7 @@ function openAt(lon: number, lat: number) {
   placeMarker(lon, lat);
   const placeP = reverseGeocode(lon, lat, cities);
   if (mode === 'live') liveUi.showCard(lon, lat, placeP);
+  else if (mode === 'atlas') atlasUi.showCard(lon, lat, placeP);
   else climateUi?.showCard(lon, lat, false, placeP);
 }
 
@@ -188,6 +194,7 @@ units.onChange(() => {
   paintUnits();
   if (mode === 'live') liveUi?.refreshUnits();
   else if (mode === 'climate') climateUi?.refreshUnits();
+  else if (mode === 'atlas') atlasUi?.refreshUnits();
   if (marker) {
     const ll = marker.getLngLat();
     openAt(ll.lng, ll.lat);
@@ -288,6 +295,7 @@ map.on('load', async () => {
     climateUi.live = live;
     climateUi.liveReady = liveReady;
     climateUi.nowCard = (lon, lat, placeP) => liveUi.showCard(lon, lat, placeP ?? reverseGeocode(lon, lat, cities));
+    atlasUi = new AtlasUI(map, field, els, climateUi, cities, dem, setStatus, BASE);
     const startLive = () =>
       live
         .init()
@@ -297,11 +305,12 @@ map.on('load', async () => {
         })
         .finally(liveReadyResolve);
     // the climate finder is the home page; the live forecast warms up behind it
-    if (new URL(location.href).searchParams.get('mode') === 'live') {
+    const start = new URL(location.href).searchParams.get('mode');
+    if (start === 'live') {
       startLive();
       await setMode('live');
     } else {
-      await setMode('climate');
+      await setMode(start === 'atlas' ? 'atlas' : 'climate');
       startLive();
     }
   } catch (e) {
@@ -311,4 +320,4 @@ map.on('load', async () => {
 });
 
 // expose for debugging / tests
-(window as unknown as { __wa: unknown }).__wa = { map, field, get live() { return live; }, get climate() { return climateUi; } };
+(window as unknown as { __wa: unknown }).__wa = { map, field, get live() { return live; }, get climate() { return climateUi; }, get atlas() { return atlasUi; } };
