@@ -532,7 +532,9 @@ export class AtlasUI {
       stat('Average', def('tmean').fmt(at('tmean', YEAR)), `high ${def('tmax').fmt(at('tmax', YEAR), false)} · low ${def('tmin').fmt(at('tmin', YEAR), false)}`),
       stat('Sunshine', `${def('sun').fmt(at('sun', YEAR))} a year`, fin(at('uv', YEAR)) ? `UV peak ${Math.round(at('uv', YEAR))} on average` : undefined),
       stat('Precipitation', `${def('precip').fmt(at('precip', YEAR))} a year`, `${Math.round(at('wetdays', YEAR))} wet days`),
-      stat('Snowfall', `${def('snowfall').fmt(at('snowfall', YEAR))} a year`, `snow on the ground ${Math.round(at('snowdays', YEAR))} days`),
+      at('snowfall', YEAR) < 0.5 && at('snowdays', YEAR) < 0.5
+        ? stat('Snowfall', 'None', 'in a typical year')
+        : stat('Snowfall', `${def('snowfall').fmt(at('snowfall', YEAR))} a year`, `snow on the ground ${Math.round(at('snowdays', YEAR))} days`),
       ...(fin(at('aqi', YEAR)) ? [stat('Air quality', `${Math.round(at('goodair', YEAR))} good days`, `average AQI ${Math.round(at('aqi', YEAR))} (model estimate)`)] : []),
       ...(fin(at('sst', YEAR)) ? [stat('Sea', def('sst').fmt(at('sst', YEAR)), 'average nearby sea temperature')] : []),
     ];
