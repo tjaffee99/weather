@@ -10,6 +10,8 @@ export interface LiveRequest {
   v: LiveVar;
   /** instead of a GFS field: HRRR snow depth for this domain at valid time t */
   hrrr?: { domain: HrrrDomain; t: number };
+  /** absolute URL of the app's data/ folder (air-quality corrections) */
+  dataBase?: string;
 }
 export interface LiveResponse {
   id: number;
@@ -26,7 +28,7 @@ export interface LiveResponse {
 }
 
 self.onmessage = async (e: MessageEvent<LiveRequest>) => {
-  const { id, cycle, fh, v, hrrr } = e.data;
+  const { id, cycle, fh, v, hrrr, dataBase } = e.data;
   try {
     if (hrrr) {
       const r = await hrrrSnow(hrrr.domain, hrrr.t);
@@ -35,7 +37,7 @@ self.onmessage = async (e: MessageEvent<LiveRequest>) => {
       return;
     }
     if (v === 'sun' || v === 'uv' || v === 'uvmax' || v === 'aqi') {
-      const out = await (v === 'sun' ? sunshineHours(cycle, fh) : v === 'uv' ? uvIndexAt(cycle, fh) : v === 'uvmax' ? uvIndexPeak(cycle, fh) : aqiField(cycle.time + fh * 3600_000));
+      const out = await (v === 'sun' ? sunshineHours(cycle, fh) : v === 'uv' ? uvIndexAt(cycle, fh) : v === 'uvmax' ? uvIndexPeak(cycle, fh) : aqiField(cycle.time + fh * 3600_000, dataBase ?? ''));
       (self as unknown as Worker).postMessage({ id, values: out, nx: 1440, ny: 721 } satisfies LiveResponse, [out.buffer]);
       return;
     }

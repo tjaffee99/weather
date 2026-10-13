@@ -334,10 +334,11 @@ function sections(): { title: string; rows: Row[] }[] {
       ],
     },
     {
-      title: 'Air (model estimate)',
+      title: 'Air quality (estimate)',
       rows: [
         { key: 'aqi', label: 'Air quality', text: (v) => String(Math.round(v)), tip: (v, m) => `${LONG_MONTHS[m]}: US AQI averages ${Math.round(v)} (${aqiWord(v)}), from PM2.5`, color: (v) => soften(colorAt(AQI, v), 0.25) },
         { key: 'goodAirDays', label: 'Good-air days', text: (v) => String(Math.round(v)), tip: (v, m) => `${LONG_MONTHS[m]}: ${Math.round(v)} days with good air (AQI 50 or less)`, color: (v, m) => ramp('#3fa35f', v / DAYS_IN_MONTH[m]) },
+        { key: 'badAirDays', label: 'Unhealthy days', text: (v) => String(Math.round(v)), tip: (v, m) => `${LONG_MONTHS[m]}: ${Math.round(v)} days with AQI over 100 (unhealthy for sensitive groups or worse)`, color: (v, m) => ramp('#c4553c', v / DAYS_IN_MONTH[m]) },
       ],
     },
     {
@@ -386,11 +387,11 @@ export function monthTable(r: DetailResult): HTMLTableElement {
 /** Where the numbers come from, in plain words (technical detail on hover). */
 export function sourceNote(r: DetailResult, elev: number): HTMLElement {
   const shift = units.imperial ? r.shift * 1.8 : r.shift;
-  const detail = `${r.cells > 1 ? `Blend of ${r.cells} nearby ERA5 grid cells, mainly the one at` : 'ERA5 grid cell at'} ${r.cellLat.toFixed(2)}°, ${r.cellLon.toFixed(2)}° (avg. ${r.cellElev} m); temperatures shifted ${shift >= 0 ? '+' : '−'}${Math.abs(shift).toFixed(1)}° for this spot.`;
+  const detail = `${r.cells > 1 ? `Blend of ${r.cells} nearby ERA5 grid cells, mainly the one at` : 'ERA5 grid cell at'} ${r.cellLat.toFixed(2)}°, ${r.cellLon.toFixed(2)}° (avg. ${r.cellElev} m); temperatures shifted ${shift >= 0 ? '+' : '−'}${Math.abs(shift).toFixed(1)}° for this spot; rain and snow scaled from 0.25° data at this elevation.`;
   const el = h(
     'div',
     { class: 'note', 'data-tip': detail },
-    `From 25 years of weather (ERA5 reanalysis, 2001–2025): one real day for each date, from nearby ~100 km grid cells, with temperatures adjusted to this spot's elevation (${Math.round(units.imperial ? elev * 3.281 : elev)} ${units.imperial ? 'ft' : 'm'}). Hover a cell or the chart for details.`,
+    `From 25 years of weather (ERA5 reanalysis, 2001–2025): one real day for each date, from nearby ~100 km grid cells, with temperatures, rain and snow adjusted to this spot's elevation (${Math.round(units.imperial ? elev * 3.281 : elev)} ${units.imperial ? 'ft' : 'm'}). Air quality: NOAA's aerosol model matched to satellite and ground-monitor estimates (2021–2025). Hover a cell or the chart for details.`,
   );
   bindTips(el);
   return el;

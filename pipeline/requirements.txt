@@ -4,3 +4,4 @@ requests>=2.31
 pillow>=10
 pyshp>=2.3
 eccodes>=2.0  # gefs_aq.py only (GRIB2 decoding)
+h5py>=3.10  # acag_bias.py only (netCDF4/HDF5)

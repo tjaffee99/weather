@@ -117,6 +117,8 @@ def main():
                     help="compute only daily sunshine hours for the same sample days (samples_sun.npz)")
     ap.add_argument("--only-uv", action="store_true",
                     help="compute only the daily maximum UV index for the same sample days (samples_uv.npz)")
+    ap.add_argument("--only-hires", action="store_true",
+                    help="monthly 0.25 deg precipitation, snowfall and snow depth normals for the same sample days (hires_normals.npz)")
     ap.add_argument("--only-extra", action="store_true",
                     help="compute only daytime relative humidity and daily snowfall for the same sample days (samples_extra.npz)")
     args = ap.parse_args()
@@ -164,6 +166,8 @@ def main():
         return uv_index(args, years, L, cz, coarse, lat_c, lon_c, offs)
     if args.only_extra:
         return extra(args, years, L, cz, coarse, lat_c, lon_c, offs)
+    if args.only_hires:
+        return hires(args, years, L)
 
     # ---- blocks ----------------------------------------------------------
     nblocks = (365 + L - 1) // L
@@ -501,6 +505,63 @@ def extra(args, years, L, cz, coarse, lat_c, lon_c, offs):
                 out[k][(int(d["doy0"]) + j) % 365] = d[k][j]
     np.savez(os.path.join(args.work, "samples_extra.npz"), **out)
     print("wrote samples_extra.npz")
+
+
+HIRES_VARS = ("precip", "snowfall", "snow")
+
+
+def hires(args, years, L):
+    """Monthly means at the native 0.25 deg of daily precipitation (mm), snowfall
+    (cm at 10:1) and snow depth (cm), over the same sample days as the 1-degree
+    sample. A 1-degree cell can span a valley floor and a mountain range; these
+    show how precipitation and snow vary with elevation inside each cell, which
+    encode_climate.py turns into per-elevation-level factors (see levels())."""
+    nblocks = (365 + L - 1) // L
+    part_dir = os.path.join(args.work, "parts_hires")
+    os.makedirs(part_dir, exist_ok=True)
+    pool = ThreadPoolExecutor(args.threads)
+    t_start = time.time()
+    month_of = np.searchsorted([0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365], np.arange(365), side="right") - 1
+    blocks = range(nblocks) if not args.limit_blocks else range(args.limit_blocks)
+    for b in blocks:
+        part = os.path.join(part_dir, f"b{b:03d}.npz")
+        if os.path.exists(part):
+            continue
+        doy0, ndays, year, start = block_start(b, L, years, args)
+        h0 = hidx(start)
+        keys = [(v, h) for v in ("total_precipitation", "snowfall") for h in range(1, 24 * ndays + 1)]
+        keys += [(v, 24 * k + 12) for v in ("snow_depth", "snow_density") for k in range(ndays)]
+        got = dict(pool.map(lambda key: (key, np.nan_to_num(fetch(key[0], h0 + key[1]), nan=0.0)), keys))
+        sums = {}
+        for k in range(ndays):
+            m = int(month_of[(doy0 + k) % 365])
+            hrs = range(24 * k + 1, 24 * k + 25)  # accumulations over the UTC day
+            pr = sum(np.maximum(got[("total_precipitation", h)], 0) for h in hrs) * 1000.0
+            sf = sum(np.maximum(got[("snowfall", h)], 0) for h in hrs) * 1000.0
+            sd, rho = got[("snow_depth", 24 * k + 12)], got[("snow_density", 24 * k + 12)]
+            sn = np.where(sd > 1e-5, sd * 1000.0 / np.maximum(rho, 50.0), 0) * 100
+            for v, a in zip(HIRES_VARS, (pr, sf, sn)):
+                sums.setdefault(f"{v}_{m}", np.zeros((NLAT, NLON), np.float64))
+                sums[f"{v}_{m}"] += a
+            sums[f"n_{m}"] = sums.get(f"n_{m}", 0) + 1
+        np.savez_compressed(part, **{k: (v.astype(np.float32) if isinstance(v, np.ndarray) else v) for k, v in sums.items()})
+        print(f"hires block {b+1}/{nblocks} {start:%Y-%m-%d} elapsed={time.time()-t_start:.0f}s", flush=True)
+
+    if args.limit_blocks:
+        return
+    acc = {v: np.zeros((12, NLAT, NLON), np.float64) for v in HIRES_VARS}
+    n = np.zeros(12)
+    for b in range(nblocks):
+        d = np.load(os.path.join(part_dir, f"b{b:03d}.npz"))
+        for key in d.files:
+            v, m = key.rsplit("_", 1)
+            if v == "n":
+                n[int(m)] += d[key]
+            else:
+                acc[v][int(m)] += d[key]
+    out = {v: (acc[v] / n[:, None, None]).astype(np.float32) for v in HIRES_VARS}
+    np.savez(os.path.join(args.work, "hires_normals.npz"), days=n, **out)
+    print("wrote hires_normals.npz")
 
 
 if __name__ == "__main__":

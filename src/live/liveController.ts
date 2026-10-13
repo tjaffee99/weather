@@ -57,6 +57,8 @@ export const GFS_GRID: GridSpec = { nx: 1440, ny: 721, lon0: 0, lat0: 90, dx: 0.
 const GRID = GFS_GRID;
 
 type FieldData = { values: Float32Array; u?: Float32Array; v?: Float32Array };
+/** absolute URL of data/ (workers resolve relative URLs against their own script) */
+const DATA_BASE = new URL(`${import.meta.env.BASE_URL}data/`, location.href).href;
 
 class LivePool {
   private workers: Worker[] = [];
@@ -79,7 +81,7 @@ class LivePool {
     const w = this.workers[this.next++ % this.workers.length];
     return new Promise((resolve, reject) => {
       this.pending.set(id, (r) => (r.error ? reject(new Error(r.error)) : resolve(r)));
-      w.postMessage({ id, cycle, fh, v, hrrr } satisfies LiveRequest);
+      w.postMessage({ id, cycle, fh, v, hrrr, dataBase: DATA_BASE } satisfies LiveRequest);
     });
   }
 }
@@ -316,6 +318,14 @@ export class LiveController {
     let v = va + (vb - va) * mix;
     if (lapse && this.orog) v += LAPSE * (bilinear(this.orog, lon, lat) - (elev ?? demAt(this.dem, lon, lat)));
     return v;
+  }
+
+  /** US AQI at a point for a time, from the bias-corrected aerosol forecast (NaN if unavailable). */
+  async aqiAt(lon: number, lat: number, t: number): Promise<number> {
+    if (!this.cycle) return NaN;
+    const fh = Math.max(0, Math.round((t - this.cycle.time) / (3 * HOUR)) * 3);
+    const r = await this.get('aqi', fh);
+    return bilinear(r.values, lon, lat);
   }
 
   /**

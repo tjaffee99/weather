@@ -69,6 +69,8 @@ uniform float u_useAlt;
 uniform float u_opacity;
 uniform float u_cut;           // climate: values below are dimmed
 uniform float u_csqrt;         // climate: 1 = square-root scale (fraction of days), 0 = values as they are (atlas)
+uniform sampler2D u_under;     // copy of the map drawn so far (for u_waterMask)
+uniform vec4 u_waterMask;      // a = 1: draw only where the map underneath is this water colour (rgb)
 
 const float PI = 3.141592653589793;
 
@@ -238,6 +240,11 @@ void main() {
     }
   }
   float a = col.a * alpha * u_opacity;
+  if (u_waterMask.a > 0.5) {
+    // the water polygons are opaque and drawn first, so their colour marks the sea pixel-exactly
+    vec3 under = texelFetch(u_under, ivec2(gl_FragCoord.xy), 0).rgb;
+    a *= 1.0 - smoothstep(0.03, 0.08, distance(under, u_waterMask.rgb));
+  }
   fragColor = vec4(col.rgb * a, a);
 }`;
 
@@ -268,7 +275,7 @@ const UNIFORMS = [
   'u_projection_transition', 'u_projection_fallback_matrix', 'u_offset',
   'u_mode', 'u_fieldA', 'u_fieldB', 'u_alt', 'u_orog', 'u_dem', 'u_palette', 'u_result', 'u_cellElev',
   'u_grid', 'u_gridSize', 'u_cgrid', 'u_cgridSize', 'u_levels', 'u_mix', 'u_domain', 'u_log',
-  'u_lapse', 'u_snowH', 'u_useAlt', 'u_opacity', 'u_cut', 'u_csqrt', 'u_ldem', 'u_ldemExt',
+  'u_lapse', 'u_snowH', 'u_useAlt', 'u_opacity', 'u_cut', 'u_csqrt', 'u_under', 'u_waterMask', 'u_ldem', 'u_ldemExt',
   'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy', 'u_reg0', 'u_reg1', 'u_rcone', 'u_rgrid',
 ];
 
@@ -296,6 +303,12 @@ export class FieldLayer implements CustomLayerInterface {
   snowH = 0;
   /** climate mode: show the square root of the result (finder) or the values themselves (atlas) */
   climateSqrt = true;
+  /**
+   * Draw only over water of this colour (0-1 RGB), e.g. sea temperature; null = everywhere.
+   * The style's water layer must then be fully opaque, so that it is drawn before this layer.
+   */
+  waterOnly: [number, number, number] | null = null;
+  private underSize: [number, number] = [0, 0];
   useAlt = 0;
   opacity = 1;
   /** climate mode: normalised value below which results are dimmed (0 = off) */
@@ -358,6 +371,10 @@ export class FieldLayer implements CustomLayerInterface {
     this.tex.result = this.makeArray(1, 1, 1, new Float32Array([0, 0]));
     this.tex.ldem = this.makeTex2D(1, 1, new Float32Array([0]), 1);
     this.tex.mfields = this.makeArrayR(1, 1, 1, new Float32Array([0]));
+    this.tex.under = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, this.tex.under);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, new Uint8Array(3));
+    this.setParams(gl.TEXTURE_2D, gl.CLAMP_TO_EDGE);
     this.tex.palette = gl.createTexture()!;
   }
 
@@ -607,6 +624,23 @@ export class FieldLayer implements CustomLayerInterface {
     bind(9, 'mfields', gl.TEXTURE_2D_ARRAY, 'u_mfields');
     bind(10, 'reg0', gl.TEXTURE_2D, 'u_reg0');
     bind(11, 'reg1', gl.TEXTURE_2D, 'u_reg1');
+    if (this.waterOnly) {
+      // copy what the map has drawn so far (background and opaque water)
+      const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+      gl.activeTexture(gl.TEXTURE12);
+      gl.bindTexture(gl.TEXTURE_2D, this.tex.under!);
+      if (this.underSize[0] !== w || this.underSize[1] !== h) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, w, h, 0, gl.RGB, gl.UNSIGNED_BYTE, null);
+        this.setParams(gl.TEXTURE_2D, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        this.underSize = [w, h];
+      }
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
+    }
+    bind(12, 'under', gl.TEXTURE_2D, 'u_under');
+    const wm = this.waterOnly;
+    gl.uniform4f(p.u.u_waterMask, wm?.[0] ?? 0, wm?.[1] ?? 0, wm?.[2] ?? 0, wm ? 1 : 0);
     const rc = new Float32Array(8), rg = new Float32Array(8);
     this.reg.forEach((g, i) => {
       if (!g || this.mode !== 0) return;

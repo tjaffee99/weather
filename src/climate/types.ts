@@ -22,8 +22,24 @@ export interface ClimateMeta {
   ncells: number;
   sampleYears: number[];
   vars: Record<ClimVar, VarMeta>;
-  /** atlas normals: int16 [13][ncells] (Jan..Dec, year) per variable */
-  atlas?: Record<string, { file: string; kind: 'mean' | 'sum'; scale: number; bytes: number }>;
+  /**
+   * Per-elevation-level factors for precipitation and snow: uint8 [var][month][level][cell],
+   * factor = 2^((code - 128) / steps), 0 = none (pipeline/encode_climate.py level_factors)
+   */
+  levels?: { file: string; vars: ClimVar[]; steps: number; bytes: number };
+  /** atlas: daily normals as yearly harmonics, int16 [coef][level][cell] (sea temperature: [coef][grid] + flags) */
+  atlas?: Record<string, AtlasMeta>;
+  atlasHarmonics?: number;
+}
+
+export interface AtlasMeta {
+  file: string;
+  kind: 'mean' | 'sum';
+  scale: number;
+  levels: number;
+  /** 'sea': a full-grid field over the sea instead of land cells */
+  grid?: 'sea';
+  bytes: number;
 }
 
 /** A criterion in metric units; bounds may be +-Infinity. */
@@ -82,6 +98,7 @@ export interface MonthStats {
   snowfall: number; // cm of snow falling in the month
   aqi: number; // average daily US AQI (PM2.5)
   goodAirDays: number; // days with AQI <= 50
+  badAirDays: number; // days with AQI > 100
   match: number; // matching days per month
   /** the conditions that rule out the most days this month, worst first */
   why: Obstacle[];

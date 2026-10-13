@@ -49,7 +49,7 @@ export const CRITERIA: CritDef[] = [
     def: [-Infinity, 70], // not clammy
   },
   {
-    v: 'aqi', group: 'Sky & air', label: 'Air quality', hint: 'US AQI from PM2.5: 50 or less good, 100 or less moderate (model estimate)', q: 'index', kind: 'continuous',
+    v: 'aqi', group: 'Sky & air', label: 'Air quality', hint: 'US AQI from PM2.5: 50 or less good, 100 or less moderate (satellite-calibrated estimate)', q: 'index', kind: 'continuous',
     metric: { min: 0, max: 300, step: 10 }, imperial: { min: 0, max: 300, step: 10 }, file: 'aqi',
     def: [-Infinity, 100], // fine for everyone except unusually sensitive people
   },

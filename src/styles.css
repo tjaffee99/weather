@@ -288,6 +288,9 @@ button {
 .seg.period-seg button:first-child {
   flex: 2;
 }
+.day-scrub {
+  margin-top: 4px;
+}
 .seg.layer-variant {
   margin: 0 0 4px 46px;
 }

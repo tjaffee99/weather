@@ -24,6 +24,62 @@ let daylight: Float32Array; // [row * days + d]
 const data: Partial<Record<ClimVar, Uint8Array>> = {};
 const loading: Partial<Record<ClimVar, Promise<void>>> = {};
 const TEMP_VARS: ClimVar[] = ['feels', 'tmax', 'tmin'];
+let monthOf: Uint8Array; // calendar month of each sample day
+
+/**
+ * Precipitation and snow at each elevation level: the cell's value times a
+ * per-month factor (pipeline/encode_climate.py level_factors), so a valley
+ * floor and the mountains above it in the same 1° cell get their own rain and
+ * snow. Per variable, cell-major: fc[(cell * 12 + month) * LEVELS + level] is
+ * the factor code, flat[cell * 12 + month] = 1 when all levels share it.
+ */
+interface LevelVar {
+  fc: Uint8Array;
+  flat: Uint8Array;
+}
+const levelData: Partial<Record<ClimVar, LevelVar>> = {};
+let levelsLoading: Promise<void> | null = null;
+const FACTOR = new Float32Array(256);
+
+function isLevelVar(v: CritVar): v is ClimVar {
+  return !!meta.levels?.vars.includes(v as ClimVar);
+}
+
+function needLevels(): Promise<void> {
+  if (!meta.levels) return Promise.resolve();
+  levelsLoading ??= fetchBinary(`${base}data/climate/${meta.levels.file}`).then((buf) => {
+    const L = meta.levels!;
+    const n = cells.ncells;
+    for (let k = 0; k < 256; k++) FACTOR[k] = k === 0 ? 0 : Math.pow(2, (k - 128) / L.steps);
+    L.vars.forEach((v, vi) => {
+      const fc = new Uint8Array(n * 12 * LEVELS), flat = new Uint8Array(n * 12);
+      for (let m = 0; m < 12; m++)
+        for (let l = 0; l < LEVELS; l++) {
+          const src = ((vi * 12 + m) * LEVELS + l) * n;
+          for (let c = 0; c < n; c++) fc[(c * 12 + m) * LEVELS + l] = buf[src + c];
+        }
+      for (let c = 0; c < n; c++)
+        for (let m = 0; m < 12; m++) {
+          const o = (c * 12 + m) * LEVELS;
+          let same = 1;
+          for (let l = 1; l < LEVELS; l++) if (fc[o + l] !== fc[o]) same = 0;
+          flat[c * 12 + m] = same;
+        }
+      levelData[v] = { fc, flat };
+    });
+  });
+  levelsLoading.catch(() => (levelsLoading = null));
+  return levelsLoading;
+}
+
+/** Factor for a variable at a cell, sample day and fractional level (1 without level data). */
+function levelFactor(v: ClimVar, c: number, d: number, lvl: number): number {
+  const ld = levelData[v];
+  if (!ld) return 1;
+  const o = (c * 12 + monthOf[d]) * LEVELS;
+  const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
+  return (1 - f) * FACTOR[ld.fc[o + l0]] + f * FACTOR[ld.fc[o + l1]];
+}
 
 function post(msg: unknown, transfer: Transferable[] = []) {
   ctx.postMessage(msg, transfer);
@@ -47,6 +103,11 @@ async function init(b: string) {
       }
   // daylight hours per latitude row and day (sunrise to sunset incl. refraction)
   const days = meta.days;
+  monthOf = new Uint8Array(days);
+  for (let d = 0, m = 0; d < days; d++) {
+    while (d >= MONTH_START[m + 1]) m++;
+    monthOf[d] = m;
+  }
   daylight = new Float32Array(ny * days);
   for (let i = 0; i < ny; i++) {
     const phi = ((meta.grid.lat0 - i * meta.grid.dy) * Math.PI) / 180;
@@ -67,8 +128,10 @@ async function init(b: string) {
 }
 
 function need(vars: ClimVar[]): Promise<void> {
-  return Promise.all(
-    vars.map((v) => {
+  const lv = vars.some((v) => isLevelVar(v)) ? needLevels() : Promise.resolve();
+  return Promise.all([
+    lv,
+    ...vars.map((v) => {
       if (data[v]) return Promise.resolve();
       if (!loading[v]) {
         const vm = meta.vars[v];
@@ -83,7 +146,7 @@ function need(vars: ClimVar[]): Promise<void> {
       }
       return loading[v]!;
     }),
-  ).then(() => undefined);
+  ]).then(() => undefined);
 }
 
 /**
@@ -113,6 +176,24 @@ function plainLut(c: Criterion): Float32Array {
   return lut;
 }
 
+/**
+ * Matching for a binned rain/snow variable scaled by a level factor:
+ * lut[factorCode * 256 + code] = 1 when the bin's middle value times the factor
+ * lies within the range. With a factor of 1 this is the same as whole bins.
+ */
+function levelLut(c: Criterion): Float32Array {
+  const vm = meta.vars[c.v as ClimVar];
+  const e = vm.edges!;
+  const hi = c.hi < e[0] ? e[0] * (1 - 1e-6) : c.hi; // "none" = below the first edge
+  const lut = new Float32Array(256 * 256);
+  for (let fc = 0; fc < 256; fc++)
+    for (let k = 0; k <= e.length; k++) {
+      const x = decodeValue(c.v as ClimVar, k) * FACTOR[fc];
+      if (x >= c.lo - 1e-9 && x <= hi + 1e-9) lut[fc * 256 + k] = 1;
+    }
+  return lut;
+}
+
 /** Fraction of the band [v - step/2, v + step/2] that lies within [lo, hi]. */
 function bandFraction(v: number, step: number, lo: number, hi: number): number {
   const a = Math.max(lo, v - step / 2), b = Math.min(hi, v + step / 2);
@@ -126,8 +207,8 @@ interface Cond {
   hi: number;
   /** how well day i meets this condition (0..1); temperatures between levels l0, l1 */
   weight(i: number, row: number, d: number, l0: number, l1: number, f: number): number;
-  /** the day's value in the condition's units (temperatures shifted to the point) */
-  value(i: number, row: number, d: number, shift: number): number;
+  /** the day's value in the condition's units (temperatures shifted, rain and snow scaled to the point's level) */
+  value(i: number, row: number, d: number, shift: number, lvl: number): number;
 }
 
 interface Prepared {
@@ -135,11 +216,13 @@ interface Prepared {
   plain: { arr: Uint8Array; lut: Float32Array }[];
   /** temperatures, shifted to each elevation level: lut[level * 256 + code] */
   temps: { arr: Uint8Array; lut: Float32Array; lmin: Int8Array; lmax: Int8Array }[];
+  /** rain and snow with per-level factors: lut[factorCode * 256 + code] */
+  levs: { arr: Uint8Array; lut: Float32Array; ld: LevelVar }[];
   daylight?: [number, number];
 }
 
 function prepare(crit: Criterion[]): Prepared {
-  const p: Prepared = { conds: [], plain: [], temps: [] };
+  const p: Prepared = { conds: [], plain: [], temps: [], levs: [] };
   for (const c of crit) {
     if (c.v === 'daylight') {
       p.daylight = [c.lo, c.hi];
@@ -174,6 +257,19 @@ function prepare(crit: Criterion[]): Prepared {
         weight: (i, _row, _d, l0, l1, f) => (1 - f) * lut[l0 * 256 + arr[i]] + f * lut[l1 * 256 + arr[i]],
         value: (i, _row, _d, shift) => arr[i] * vm.scale! + vm.offset! + shift,
       });
+    } else if (isLevelVar(c.v) && levelData[c.v]) {
+      const ld = levelData[c.v]!;
+      const lut = levelLut(c);
+      const v = c.v;
+      p.levs.push({ arr, lut, ld });
+      p.conds.push({
+        v, lo: c.lo, hi: c.hi,
+        weight: (i, _row, d, l0, l1, f) => {
+          const o = ((i / meta.days) | 0) * 12 * LEVELS + monthOf[d] * LEVELS;
+          return (1 - f) * lut[ld.fc[o + l0] * 256 + arr[i]] + f * lut[ld.fc[o + l1] * 256 + arr[i]];
+        },
+        value: (i, _row, d, _shift, lvl) => decode(arr[i]) * levelFactor(v, (i / meta.days) | 0, d, lvl),
+      });
     } else {
       const lut = plainLut(c);
       p.plain.push({ arr, lut });
@@ -199,10 +295,14 @@ function plainWeight(p: Prepared, i: number, row: number, d: number): number {
   return w;
 }
 
-/** Weight of day i for the temperature conditions at elevation level l. */
-function tempWeight(p: Prepared, i: number, l: number): number {
+/** Weight of day i for the temperature (and per-level rain/snow) conditions at elevation level l. */
+function tempWeight(p: Prepared, i: number, l: number, d = 0): number {
   let w = 1;
   for (const q of p.temps) w *= q.lut[l * 256 + q.arr[i]];
+  if (p.levs.length) {
+    const o = ((i / meta.days) | 0) * 12 * LEVELS + monthOf[d] * LEVELS + l;
+    for (const q of p.levs) w *= q.lut[q.ld.fc[o] * 256 + q.arr[i]];
+  }
   return w;
 }
 
@@ -218,6 +318,10 @@ function accumulate(p: Prepared, weights: Float32Array, acc: Float32Array) {
   const tArr = p.temps.map((q) => q.arr), tLut = p.temps.map((q) => q.lut);
   const tMin = p.temps.map((q) => q.lmin), tMax = p.temps.map((q) => q.lmax);
   const nP = pArr.length, nT = tArr.length;
+  const lArr = p.levs.map((q) => q.arr), lLut = p.levs.map((q) => q.lut);
+  const lFc = p.levs.map((q) => q.ld.fc), lFlat = p.levs.map((q) => q.ld.flat);
+  const nL = lArr.length;
+  const lw = new Float32Array(LEVELS);
   const dl = p.daylight;
   const codes = new Int32Array(nT);
   const active: number[] = [];
@@ -235,19 +339,41 @@ function accumulate(p: Prepared, weights: Float32Array, acc: Float32Array) {
         const h = daylight[dlBase + d];
         if (h < dl[0] || h > dl[1]) continue;
       }
-      if (nT === 0) {
-        for (let l = 0; l < LEVELS; l++) acc[l * ncells + c] += w;
-        continue;
-      }
+      // levels where the temperatures can match
       let l0 = 0, l1 = LEVELS - 1;
       for (let k = 0; k < nT; k++) {
         const code = (codes[k] = tArr[k][i]);
         if (tMin[k][code] > l0) l0 = tMin[k][code];
         if (tMax[k][code] < l1) l1 = tMax[k][code];
       }
+      if (l0 > l1) continue;
+      // rain and snow per level: one factor for flat cells, else a weight per level
+      let perLevel = false;
+      if (nL) {
+        const om = c * 12 + monthOf[d], o = om * LEVELS;
+        for (let k = 0; k < nL && w > 0; k++) {
+          if (lFlat[k][om]) w *= lLut[k][lFc[k][o] * 256 + lArr[k][i]];
+          else perLevel = true;
+        }
+        if (w === 0) continue;
+        if (perLevel) {
+          let any = 0;
+          for (let l = l0; l <= l1; l++) {
+            let t = 1;
+            for (let k = 0; k < nL; k++) if (!lFlat[k][om]) t *= lLut[k][lFc[k][o + l] * 256 + lArr[k][i]];
+            lw[l] = t;
+            any += t;
+          }
+          if (any === 0) continue;
+        }
+      }
+      if (nT === 0) {
+        for (let l = 0; l < LEVELS; l++) acc[l * ncells + c] += perLevel ? w * lw[l] : w;
+        continue;
+      }
       for (let l = l0; l <= l1; l++) {
         const o = l * 256;
-        let t = w;
+        let t = perLevel ? w * lw[l] : w;
         for (let k = 0; k < nT; k++) t *= tLut[k][o + codes[k]];
         acc[l * ncells + c] += t;
       }
@@ -381,13 +507,13 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
         const miss = 1 - q.weight(i, cellRow[c], d, l0, l1, f);
         if (miss <= 0) return;
         // which side it misses on: the nearer bound
-        const v = q.value(i, cellRow[c], d, shift);
+        const v = q.value(i, cellRow[c], d, shift, lvl);
         const low = !Number.isFinite(q.hi) || (Number.isFinite(q.lo) && v - q.lo < q.hi - v);
         fails[m][k * 2 + (low ? 0 : 1)] += (w * miss) / (MONTH_START[m + 1] - MONTH_START[m]);
       });
       const pw = plainWeight(p, i, cellRow[c], d);
       if (pw === 0) continue;
-      m1[d] = pw * ((1 - f) * tempWeight(p, i, l0) + f * tempWeight(p, i, l1));
+      m1[d] = pw * ((1 - f) * tempWeight(p, i, l0, d) + f * tempWeight(p, i, l1, d));
       match[d] += w * m1[d];
     }
     // monthly normals over smoothed month windows (see monthWeights), as in the atlas
@@ -395,6 +521,8 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
     for (let m = 0; m < 12; m++) {
       const n = MONTH_START[m + 1] - MONTH_START[m];
       const narrow = K.narrow[m], wide = K.wide[m];
+      // rain and snow are scaled to the point's elevation level (1 for other variables)
+      const fac = (v: ClimVar, d: number) => (isLevelVar(v) ? levelFactor(v, c, d, lvl) : 1);
       const mean = (v: ClimVar, k: Float64Array, sh = 0) => {
         const arr = data[v];
         if (!arr) return undefined;
@@ -405,7 +533,7 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
           if (!kd) continue;
           const code = arr[c * days + d];
           if (nodata !== undefined && code === nodata) continue;
-          s += kd * (decodeValue(v, code) + sh);
+          s += kd * (decodeValue(v, code) * fac(v, d) + sh);
           ws += kd;
         }
         return ws ? s / ws : undefined;
@@ -415,7 +543,7 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
         const arr = data[v];
         if (!arr) return undefined;
         let s = 0;
-        for (let d = 0; d < days; d++) if (wide[d] && f(decodeValue(v, arr[c * days + d]))) s += wide[d];
+        for (let d = 0; d < days; d++) if (wide[d] && f(decodeValue(v, arr[c * days + d]) * fac(v, d))) s += wide[d];
         return s * n;
       };
       let mt = 0;
@@ -433,6 +561,7 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
       add(m, 'rh', mean('rh', wide), w);
       add(m, 'aqi', mean('aqi', wide), w);
       add(m, 'goodAirDays', count('aqi', (x) => x <= 50), w);
+      add(m, 'badAirDays', count('aqi', (x) => x > 100), w);
       const sf = mean('snowfall', wide);
       add(m, 'snowfall', sf === undefined ? undefined : sf * n, w);
       const pm = mean('precip', wide);

@@ -4,7 +4,9 @@
 Input : <work>/samples_pass0.npz (from era5_climate.py) and static_<res>.npz, plus
         samples_sun / _uv / _extra (era5_climate.py --only-...) and samples_aq (gefs_aq.py)
 Output: public/data/climate/meta.json, cells.bin, <var>.bin (gzip) for the finder,
-        and atlas/<id>.bin: monthly and annual normals per cell for the atlas view
+        levels.bin: per-elevation-level factors for precipitation and snow (needs
+        hires_normals.npz from era5_climate.py --only-hires), and atlas/<id>.bin:
+        daily normals as yearly harmonics per cell for the atlas view
 
 Each variable is one file so the app only downloads what the active criteria
 need. Values are quantised to uint8 codes and predictively coded on the full
@@ -186,7 +188,17 @@ def main():
         checksum = int((cm.ravel() * (np.arange(cm.size, dtype=np.uint64) % 65521 + 1)).sum() % (2**52))
         meta["vars"][vid] = {**enc, "file": f"{vid}.bin", "bytes": len(blob), "mode": mode, "checksum": checksum}
         print(f"{vid:7s} mode {mode} {len(blob)/1e6:6.2f} MB")
-    meta["atlas"] = atlas(smp, mask, os.path.join(a.out, "atlas"))
+    F = level_factors(a.work, st, mask)
+    if F is not None:
+        codes = np.stack([factor_codes(F[v]) for v in LEVEL_VARS])  # (3, 12, LEVELS, ncells)
+        blob = gzip.compress(codes.tobytes(), 9, mtime=0)
+        with open(os.path.join(a.out, "levels.bin"), "wb") as f:
+            f.write(blob)
+        meta["levels"] = {"file": "levels.bin", "vars": list(LEVEL_VARS), "steps": FACTOR_STEPS, "bytes": len(blob),
+                          "sigma": LEVEL_SIGMA}
+        print(f"levels  {len(blob)/1e6:6.2f} MB")
+    meta["atlas"] = atlas(smp, mask, os.path.join(a.out, "atlas"), F)
+    meta["atlasHarmonics"] = HARMONICS
     with open(os.path.join(a.out, "meta.json"), "w") as f:
         json.dump(meta, f, separators=(",", ":"))
     print(f"cells {ncells}, total {total/1e6:.2f} MB")
@@ -203,64 +215,259 @@ def month_weights(m: int, half: float, days: int = 365) -> np.ndarray:
     return w / w.sum()
 
 
-def atlas(smp: dict, mask: np.ndarray, out: str) -> dict:
-    """Monthly and annual normals per cell, from the raw (unquantised) daily samples.
+# ---------------------------------------------------------------------------
+# Elevation levels for precipitation and snow
+#
+# A 1-degree cell can hold a valley floor and the mountains above it (Fresno and
+# the Sierra Nevada share one). The finder already shifts temperatures to each
+# pixel's elevation; these factors do the same for precipitation, snowfall and
+# snow depth. From 0.25-degree normals (era5_climate.py --only-hires), each
+# level's value is the average of the cell's 0.25-degree points near that
+# level's elevation (Gaussian in elevation, sigma LEVEL_SIGMA), relative to
+# the cell mean. Factors are per calendar month. Above the highest point the
+# value stays that point's; below the lowest, snow keeps falling off at the
+# rate seen over the lowest LEVEL_SIGMA * 2 m (up to 500 m), so a valley floor
+# just below the cell's lowest 0.25-degree point isn't credited with its snow.
+LEVELS, DZ0, DZ_STEP = 9, -2000.0, 500.0  # mirrors src/climate/types.ts
+LEVEL_VARS = ("precip", "snowfall", "snow")
+LEVEL_SIGMA = 150.0  # m
+TAPER_VARS = ("snowfall", "snow")
+LEVEL_EPS = {"precip": 0.05, "snowfall": 0.01, "snow": 0.1}  # below this cell mean the factor is 1
+FACTOR_STEPS = 21  # uint8 code = 128 + 21 * log2(factor); 0 = none
 
-    Each file is int16 [13][ncells] (Jan..Dec, then the year), value = stored * scale,
-    -32768 where there is no data (sea temperature inland). "mean" variables are
-    averaged over the period, "sum" variables added up over it (hours, mm, days).
-    The sample has about one real day per calendar date, so months are taken
-    over smoothed windows (month_weights): narrow for temperature and sun,
-    wider for noisy day-to-day quantities like rain, cloud and snow.
-    """
+
+def level_factors(work: str, st, mask: np.ndarray) -> dict | None:
+    """{var: (12, LEVELS, ncells) float32} multiplicative factors, or None without hi-res normals."""
+    path = os.path.join(work, "hires_normals.npz")
+    if not os.path.exists(path):
+        print("no hires_normals.npz: precipitation and snow without elevation levels")
+        return None
+    import sys
+    sys.path.insert(0, os.path.dirname(__file__))
+    from era5_climate import Coarsener
+
+    hn = np.load(path)
+    cz = Coarsener(1.0)
+    f, R, C = cz.f, cz.rows, cz.cols
+
+    def stencil(a: np.ndarray) -> np.ndarray:
+        a = cz._crop(a)
+        return np.stack([a[di : di + R * f : f, dj : dj + C * f : f] for di in range(f + 1) for dj in range(f + 1)])
+
+    wst = np.array([cz.w[di] * cz.w[dj] for di in range(f + 1) for dj in range(f + 1)])[:, None, None]
+    wl = wst * stencil(st["lsm025"])
+    z = stencil(st["z025"] if "z025" in st.files else st["z"])
+    has = wl > 0
+    zmin = np.where(has, z, np.inf).min(0)
+    zmax = np.where(has, z, -np.inf).max(0)
+    elev = st["elev"]
+
+    def kernel(zl):
+        k = wl * np.exp(-0.5 * ((z - zl) / LEVEL_SIGMA) ** 2)
+        return k / np.maximum(k.sum(0), 1e-12)
+
+    kern = [kernel(np.clip(elev + DZ0 + lv * DZ_STEP, zmin, zmax)) for lv in range(LEVELS)]
+    k_lo = kernel(zmin)
+    z_up = np.minimum(zmin + 2 * LEVEL_SIGMA, zmax)
+    k_up = kernel(z_up)
+    below = [np.clip(zmin - (elev + DZ0 + lv * DZ_STEP), 0, 500) for lv in range(LEVELS)]
+    wn = wl / np.maximum(wl.sum(0), 1e-12)
+    out = {}
+    for v in LEVEL_VARS:
+        N = hn[v].astype(np.float64)
+        N = 0.25 * np.roll(N, 1, 0) + 0.5 * N + 0.25 * np.roll(N, -1, 0)  # steadier months
+        F = np.ones((12, LEVELS, int(mask.sum())), np.float32)
+        for m in range(12):
+            s = stencil(N[m])
+            mean = (wn * s).sum(0)
+            if v in TAPER_VARS:
+                v_lo = (k_lo * s).sum(0)
+                slope = np.where(z_up - zmin > LEVEL_SIGMA, np.maximum(0, (k_up * s).sum(0) - v_lo) / np.maximum(z_up - zmin, 1), 0)
+            for lv in range(LEVELS):
+                val = (kern[lv] * s).sum(0)
+                if v in TAPER_VARS:
+                    val = np.where(below[lv] > 0, np.maximum(0, v_lo - slope * below[lv]), val)
+                F[m, lv] = np.where(mean > LEVEL_EPS[v], val / np.maximum(mean, 1e-12), 1.0)[mask]
+        out[v] = np.clip(F, 0, 60)
+        lo = np.percentile(out[v][:, 2], [5, 50, 95])
+        print(f"levels {v:8s} factor at -1000 m: p5 {lo[0]:.2f} median {lo[1]:.2f} p95 {lo[2]:.2f}")
+    return out
+
+
+def factor_codes(F: np.ndarray) -> np.ndarray:
+    """uint8 codes for (12, LEVELS, n) factors. A cell-month whose levels differ by
+    under ~10% is noise, not terrain: it gets one code for all levels, which also
+    lets the finder skip per-level work there."""
+    with np.errstate(divide="ignore"):
+        c = np.round(128 + FACTOR_STEPS * np.log2(np.maximum(F, 1e-9)))
+    c = np.where(F < 2 ** (-127 / FACTOR_STEPS), 0, np.clip(c, 1, 255))
+    flat = (c.max(1) - c.min(1) <= 3) & (c.min(1) > 0)
+    c = np.where(flat[:, None, :], np.median(c, 1, keepdims=True).round(), c)
+    return c.astype(np.uint8)
+
+
+def factor_values(codes: np.ndarray) -> np.ndarray:
+    """The factors the browser sees (decoded codes)."""
+    return np.where(codes == 0, 0.0, 2.0 ** ((codes.astype(np.float64) - 128) / FACTOR_STEPS))
+
+
+# ---------------------------------------------------------------------------
+# Atlas: daily normals as smooth yearly curves
+#
+# For every cell (and elevation level, for precipitation and snow) the daily
+# series is smoothed with a triangle window (MONTH_NARROW for steady
+# quantities, MONTH_WIDE for noisy ones) and stored as its mean plus
+# HARMONICS yearly harmonics. The browser evaluates the curve for any day,
+# averages it over months, and takes the mean term for the year, so day,
+# month and year views agree exactly.
+HARMONICS = 4
+NC = 2 * HARMONICS + 1
+NODATA16 = -32768
+
+
+def basis(days: int = 365) -> np.ndarray:
+    """(NC, days): 1, cos(2 pi k t), sin(2 pi k t) at day centres; mirrors atlasBasis() in atlasData.ts."""
+    t = (np.arange(days) + 0.5) / days
+    rows = [np.ones(days)]
+    for k in range(1, HARMONICS + 1):
+        rows += [np.cos(2 * np.pi * k * t), np.sin(2 * np.pi * k * t)]
+    return np.array(rows)
+
+
+def transfer(half: float, days: int = 365) -> np.ndarray:
+    """Gain of the triangle window on each coefficient."""
+    j = np.arange(-int(half), int(half) + 1)
+    w = np.maximum(0, 1 - np.abs(j) / half)
+    g = [1.0]
+    for k in range(1, HARMONICS + 1):
+        h = (w * np.cos(2 * np.pi * k * j / days)).sum() / w.sum()
+        g += [h, h]
+    return np.array(g)
+
+
+def harmonics(x: np.ndarray, half: float) -> np.ndarray:
+    """x (days, n) with NaN gaps -> (NC, n) coefficients of the smoothed series; NaN where no data."""
+    days = x.shape[0]
+    with np.errstate(invalid="ignore"):
+        mean = np.nanmean(x, 0)
+    ok = np.isfinite(mean)
+    x = np.where(np.isnan(x), mean[None, :], x)
+    B = basis(days)
+    norm = np.array([1.0] + [2.0] * (NC - 1)) / days
+    c = (B @ np.where(ok[None, :], x, 0)) * norm[:, None]
+    c *= transfer(half, days)[:, None]
+    c[:, ~ok] = np.nan
+    return c
+
+
+def pack16(c: np.ndarray) -> tuple[bytes, float]:
+    """int16 with a power-of-ten-ish scale; NODATA16 where NaN."""
+    m = np.nanmax(np.abs(c)) if np.isfinite(c).any() else 1.0
+    scale = 10.0 ** np.ceil(np.log10(max(m, 1e-9) / 32000))
+    for k in (0.2, 0.5):
+        if m / (scale * k) < 32000:
+            scale *= k
+            break
+    q = np.where(np.isnan(c), NODATA16, np.clip(np.round(c / scale), -32767, 32767)).astype("<i2")
+    return q.tobytes(), float(scale)
+
+
+def sea_fill(c: np.ndarray, valid: np.ndarray, steps: int = 2) -> tuple[np.ndarray, np.ndarray]:
+    """Extend sea values a few cells onto land (8-neighbour mean) so coastlines interpolate cleanly."""
+    c = c.copy()
+    filled = valid.copy()
+    for _ in range(steps):
+        s = np.zeros_like(c)
+        n = np.zeros(valid.shape)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                if di == dj == 0:
+                    continue
+                sh = np.roll(np.roll(filled, di, 0), dj, 1)
+                if di == 1:
+                    sh[0] = False
+                if di == -1:
+                    sh[-1] = False
+                s += np.where(sh[None], np.roll(np.roll(np.nan_to_num(c), di, 1), dj, 2), 0)
+                n += sh
+        new = ~filled & (n > 0)
+        c[:, new] = (s / np.maximum(n, 1)[None])[:, new]
+        filled |= new
+    return c, filled
+
+
+def atlas(smp: dict, mask: np.ndarray, out: str, F: dict | None) -> dict:
+    """Atlas files: int16 [NC][levels][ncells] harmonic coefficients (sea temperature: [NC][rows*cols] + flags)."""
     os.makedirs(out, exist_ok=True)
     days = smp["tmax"].shape[0]
-    defs = {
-        "tmean": ("mean", 0.1, lambda: (smp["tmax"] + smp["tmin"]) / 2),
-        "tmax": ("mean", 0.1, lambda: smp["tmax"]),
-        "tmin": ("mean", 0.1, lambda: smp["tmin"]),
-        "feels": ("mean", 0.1, lambda: smp["feels_max"]),
-        "sun": ("sum", 1.0, lambda: smp["sun"]),
-        "uv": ("mean", 0.1, lambda: smp["uv"]),
-        "cloud": ("mean", 0.1, lambda: smp["cloud"]),
-        "precip": ("sum", 1.0, lambda: smp["precip"]),
-        # wet days as the finder counts them (>= 1 mm after the drizzle correction)
-        "wetdays": ("sum", 0.1, lambda: (smp["precip"] - DRIZZLE_OFFSET_MM >= 1).astype(np.float32)),
-        "snowfall": ("sum", 1.0, lambda: smp["snowfall"]),
-        "snowdays": ("sum", 0.1, lambda: (smp["snow"] >= 1).astype(np.float32)),
-        "dew": ("mean", 0.1, lambda: smp["dew"]),
-        "rh": ("mean", 0.1, lambda: smp["rh"]),
-        "wind": ("mean", 0.1, lambda: smp["wind"]),
-        "sst": ("mean", 0.1, lambda: smp["sst"]),
-        "aqi": ("mean", 0.1, lambda: smp["aqi"]),
-        "goodair": ("sum", 0.1, lambda: (smp["aqi"] <= 50).astype(np.float32)),
-    }
-    narrow = {"tmean", "tmax", "tmin", "feels", "dew", "sst", "sun", "uv"}
-    needs = {"sun": "sun", "uv": "uv", "snowfall": "snowfall", "rh": "rh", "aqi": "aqi", "goodair": "aqi"}
+    month_of = np.searchsorted(MONTH_START, np.arange(days), side="right") - 1
+    n = int(mask.sum())
+
+    def lev(v):
+        """monthly factors (12, LEVELS, n) for a level variable, as the browser decodes them; or None"""
+        return None if F is None else factor_values(factor_codes(F[v]))
+
+    Fp, Fs, Fd = lev("precip"), lev("snowfall"), lev("snow")
+    cell = lambda key: smp[key][:, mask].astype(np.float64)  # noqa: E731
+    with np.errstate(invalid="ignore"):
+        defs = {
+            # id: (kind, window, series or per-level function)
+            "tmean": ("mean", MONTH_NARROW, lambda: (cell("tmax") + cell("tmin")) / 2),
+            "tmax": ("mean", MONTH_NARROW, lambda: cell("tmax")),
+            "tmin": ("mean", MONTH_NARROW, lambda: cell("tmin")),
+            "feels": ("mean", MONTH_NARROW, lambda: cell("feels_max")),
+            "sun": ("sum", MONTH_NARROW, lambda: cell("sun")),
+            "uv": ("mean", MONTH_NARROW, lambda: cell("uv")),
+            "cloud": ("mean", MONTH_WIDE, lambda: cell("cloud")),
+            "precip": ("sum", MONTH_WIDE, (lambda: cell("precip"), Fp)),
+            # wet days as the finder counts them (>= 1 mm after the drizzle correction)
+            "wetdays": ("sum", MONTH_WIDE, (lambda: np.maximum(cell("precip") - DRIZZLE_OFFSET_MM, 0), Fp, 1.0)),
+            "snowfall": ("sum", MONTH_WIDE, (lambda: cell("snowfall"), Fs)),
+            "snowdays": ("sum", MONTH_WIDE, (lambda: cell("snow"), Fd, 1.0)),
+            "dew": ("mean", MONTH_NARROW, lambda: cell("dew")),
+            "rh": ("mean", MONTH_WIDE, lambda: cell("rh")),
+            "wind": ("mean", MONTH_WIDE, lambda: cell("wind")),
+            "aqi": ("mean", MONTH_WIDE, lambda: cell("aqi")),
+            "goodair": ("sum", MONTH_WIDE, lambda: (cell("aqi") <= 50).astype(np.float64)),
+            "badair": ("sum", MONTH_WIDE, lambda: (cell("aqi") > 100).astype(np.float64)),
+        }
+    needs = {"sun": "sun", "uv": "uv", "snowfall": "snowfall", "rh": "rh", "aqi": "aqi", "goodair": "aqi", "badair": "aqi"}
     meta = {}
-    for vid, (kind, scale, get) in defs.items():
+    for vid, (kind, half, src) in defs.items():
         if needs.get(vid, "tmax") not in smp:
             print(f"atlas: skipping {vid}")
             continue
-        x = get().astype(np.float64)[:, mask]  # (days, ncells)
-        valid = ~np.isnan(x)
-        x0 = np.where(valid, x, 0)
-        periods = []
-        for m in range(13):
-            w = np.ones(days) if m == 12 else month_weights(m, MONTH_NARROW if vid in narrow else MONTH_WIDE, days)
-            ws = w @ valid
-            with np.errstate(invalid="ignore", divide="ignore"):
-                v = np.where(ws > 0, (w @ x0) / ws, np.nan)  # weighted mean of the valid days
-            if kind == "sum":
-                v = v * (days if m == 12 else MONTH_START[m + 1] - MONTH_START[m])
-            periods.append(v)
-        q = np.stack(periods) / scale
-        q = np.where(np.isnan(q), -32768, np.clip(np.round(q), -32767, 32767)).astype("<i2")
-        blob = gzip.compress(q.tobytes(), 9, mtime=0)
+        if callable(src):
+            coefs = harmonics(src(), half)[:, None, :]  # (NC, 1, n)
+        else:
+            get, fac, *thr = src
+            x = get()
+            if fac is None:
+                ser = [x >= thr[0] if thr else x]
+            else:
+                ser = [(x * fac[month_of, lv] >= thr[0]) if thr else x * fac[month_of, lv] for lv in range(LEVELS)]
+            coefs = np.stack([harmonics(np.where(np.isnan(x), np.nan, s.astype(np.float64)), half) for s in ser], 1)
+        blob, scale = pack16(coefs)
+        gz = gzip.compress(blob, 9, mtime=0)
         with open(os.path.join(out, f"{vid}.bin"), "wb") as f:
-            f.write(blob)
-        meta[vid] = {"file": f"atlas/{vid}.bin", "kind": kind, "scale": scale, "bytes": len(blob)}
-        print(f"atlas {vid:9s} {len(blob)/1e3:6.0f} kB")
+            f.write(gz)
+        meta[vid] = {"file": f"atlas/{vid}.bin", "kind": kind, "scale": scale, "levels": coefs.shape[1], "bytes": len(gz)}
+        print(f"atlas {vid:9s} levels {coefs.shape[1]} {len(gz)/1e3:6.0f} kB")
+
+    # sea temperature over the sea itself: the full grid, extended two cells onto land
+    sst = smp["sst"].reshape(days, -1).astype(np.float64)
+    enough = (~np.isnan(sst)).mean(0) >= 0.5
+    c = harmonics(np.where(enough[None], sst, np.nan), MONTH_NARROW)
+    R, C = mask.shape
+    sea = np.isfinite(c[0]).reshape(R, C)
+    cf, filled = sea_fill(c.reshape(NC, R, C), sea)
+    flags = np.where(sea, 1, np.where(filled, 2, 0)).astype(np.uint8)
+    blob, scale = pack16(np.where(filled[None], cf, np.nan).reshape(NC, -1))
+    gz = gzip.compress(blob + flags.tobytes(), 9, mtime=0)
+    with open(os.path.join(out, "sst.bin"), "wb") as f:
+        f.write(gz)
+    meta["sst"] = {"file": "atlas/sst.bin", "kind": "mean", "scale": scale, "levels": 1, "grid": "sea", "bytes": len(gz)}
+    print(f"atlas sst (sea)  {len(gz)/1e3:6.0f} kB")
     return meta
 
 

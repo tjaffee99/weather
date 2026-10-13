@@ -5,7 +5,8 @@ import { renderLegend } from '../ui/legend';
 import { cssGradient } from '../map/palettes';
 import { coordLabel, timeLabel } from '../ui/format';
 import { colorAt, GLACIER, TEMPERATURE } from '../map/palettes';
-import { condition, openMeteo, openMeteoAir, type Hour, type PointForecast } from './pointForecast';
+import { condition, openMeteo, type Hour, type PointForecast } from './pointForecast';
+import { pm25FromAqi } from './aerosol';
 import { pointElevation } from '../map/localDem';
 import { demAt, type Dem } from '../data';
 import type { Place } from '../geocode';
@@ -311,7 +312,8 @@ export class LiveUI {
       .catch(() => (title.textContent = 'Selected location'));
 
     let fc: PointForecast | null = null;
-    const airP = openMeteoAir(lat, lon).catch(() => null);
+    // the same corrected aerosol forecast as the map's air-quality layer
+    const airP = this.c.aqiAt(lon, lat, at).then((aqi) => (Number.isFinite(aqi) ? { aqi, pm25: pm25FromAqi(aqi) } : null)).catch(() => null);
     try {
       fc = await openMeteo(lat, lon);
     } catch {
@@ -324,8 +326,7 @@ export class LiveUI {
       }
     }
     if (token !== this.cardToken || !fc.hours.length) return;
-    // only for the current hour: the air quality service gives today's readings
-    if (Math.abs(at - Date.now()) < 3 * HOUR_MS) fc.air = (await airP) ?? undefined;
+    fc.air = (await airP) ?? undefined;
     const elev = await elevP;
     if (elev !== null && token === this.cardToken) sub.textContent += ` · ${Math.round(elev)} m`;
     body.replaceChildren(...renderForecast(fc, at));
