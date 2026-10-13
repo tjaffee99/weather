@@ -20,6 +20,7 @@ import { MONTHS, MONTH_START, coordLabel, doyLabel, timeLabel, todayDoy } from '
 import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
 import { CRITERIA, GROUPS, PRESETS, type CritDef, type CritState } from './criteria';
 import { blendTaps, levelOf } from './blend';
+import { hideTip, monthTable, sourceNote, summary, yearChart } from './card';
 import { DZ0, DZ_STEP, LEVELS, type ClimVar, type ClimateMeta, type CritVar, type Criterion, type DetailResult } from './types';
 
 type Els = { panel: HTMLElement; bottom: HTMLElement; legend: HTMLElement; card: HTMLElement };
@@ -766,7 +767,7 @@ export class ClimateUI {
     this.cardAt = [lon, lat];
     const card = this.els.card;
     if (placeP) this.cardPlace = placeP.catch(() => null);
-    const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => ((this.cardAt = null), this.closeCard()) }, '✕');
+    const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => ((this.cardAt = null), hideTip(), this.closeCard()) }, '✕');
     let title = '…';
     let detail = '';
     if (!quiet) {
@@ -783,9 +784,10 @@ export class ClimateUI {
     const base = crit.filter((c) => c.v !== 'daylight').map((c) => c.v as ClimVar);
     const render = (res: DetailResult | null) => {
       if (this.cardAt?.[0] !== lon || this.cardAt?.[1] !== lat) return;
+      hideTip();
       clear(card);
       card.classList.remove('hidden');
-      card.append(close, h('div', { class: 'place' }, title), h('div', { class: 'coords' }, [detail, coordLabel(lon, lat), `${Math.round(dem)} m`].filter(Boolean).join(' · ')));
+      card.append(close, h('div', { class: 'place' }, title), h('div', { class: 'coords' }, [detail, coordLabel(lon, lat), units.imperial ? `${Math.round(dem * 3.281)} ft` : `${Math.round(dem)} m`].filter(Boolean).join(' · ')));
       if (!res) {
         card.append(h('div', { class: 'desc' }, 'No climate data here (open ocean or Antarctica).'));
         return;
@@ -794,11 +796,11 @@ export class ClimateUI {
       const big = date ? `${Math.round(res.daily[this.doy] * 100)}%` : `${Math.round(res.perYear)}`;
       card.append(
         h('div', { class: 'big' }, big, h('small', {}, date ? `chance around ${doyLabel(this.doy)}` : 'matching days a year')),
-        h('div', { class: 'desc' }, bestMonths(res)),
-        h('h3', {}, 'Chance of a matching day through the year'),
-        yearChart(res.daily, date ? this.doy : -1),
-        h('h3', {}, 'Monthly climate'),
-        normalsTable(res),
+        summary(res),
+        h('h3', {}, 'Chance of a matching day'),
+        yearChart(res, date ? this.doy : -1, this.state),
+        h('h3', {}, 'Month by month'),
+        monthTable(res),
       );
       const missing = (['cloud', 'dew', 'uv', 'wind', 'snow', 'sst'] as ClimVar[]).filter((v) => !res.loaded.includes(v));
       if (missing.length && this.meta) {
@@ -811,13 +813,7 @@ export class ClimateUI {
           ),
         );
       }
-      card.append(
-        h(
-          'div',
-          { class: 'note' },
-          `${res.cells > 1 ? `Blend of ${res.cells} nearby ERA5 grid cells, mainly the one at` : 'ERA5 grid cell at'} ${coordLabel(res.cellLon, res.cellLat)} (avg. ${res.cellElev} m); temperatures shifted ${res.shift >= 0 ? '+' : '−'}${Math.abs(units.imperial ? res.shift * 1.8 : res.shift).toFixed(1)}° for this spot's elevation. One sampled day per calendar day, drawn from 2001–2025.`,
-        ),
-      );
+      card.append(sourceNote(res, dem));
     };
     try {
       // fast pass with what is already loaded, then fill in the normals
@@ -900,113 +896,6 @@ function describe(def: CritDef, [lo, hi]: [number, number]): string {
   if (f(lo) === f(hi)) return `${f(lo)}${u}`;
   if (def.q === 'temp') return `${Math.round(toDisplay('temp', lo))}–${f(hi)}${u}`;
   return `${f(lo)} – ${f(hi)}`;
-}
-
-function bestMonths(r: DetailResult): string {
-  const m = r.months.map((x, i) => ({ i, v: (x.match ?? 0) / (MONTH_START[i + 1] - MONTH_START[i]) }));
-  const top = [...m].sort((a, b) => b.v - a.v).filter((x) => x.v > 0.05).slice(0, 3);
-  if (!top.length) return 'Rarely matches your conditions at any time of year.';
-  return `Best months: ${top.map((x) => `${MONTHS[x.i]} (${Math.round(x.v * 100)}%)`).join(', ')}`;
-}
-
-function yearChart(daily: Float32Array, mark: number): SVGSVGElement {
-  const W = 346, H = 96, top = 8, bottom = 16;
-  const ns = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(ns, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('class', 'chart');
-  let peak = 0;
-  for (const v of daily) peak = Math.max(peak, v);
-  const ymax = [0.1, 0.2, 0.3, 0.5, 0.75, 1].find((m) => m >= peak * 1.05) ?? 1;
-  const x = (d: number) => (d / 364) * W;
-  const y = (v: number) => top + (1 - v / ymax) * (H - top - bottom);
-  let d = `M0,${y(0)}`;
-  for (let i = 0; i < daily.length; i++) d += `L${x(i).toFixed(1)},${y(daily[i]).toFixed(1)}`;
-  d += `L${W},${y(0)}Z`;
-  const grad = document.createElementNS(ns, 'linearGradient');
-  grad.id = 'yc';
-  grad.setAttribute('x1', '0');
-  grad.setAttribute('x2', '0');
-  grad.setAttribute('y1', '1');
-  grad.setAttribute('y2', '0');
-  grad.innerHTML = '<stop offset="0" stop-color="#b4e0b0"/><stop offset="0.4" stop-color="#3eaec4"/><stop offset="1" stop-color="#1c3a85"/>';
-  const defs = document.createElementNS(ns, 'defs');
-  defs.append(grad);
-  svg.append(defs);
-  for (const g of [ymax / 2, ymax]) {
-    const l = document.createElementNS(ns, 'line');
-    l.setAttribute('x1', '0');
-    l.setAttribute('x2', String(W));
-    l.setAttribute('y1', String(y(g)));
-    l.setAttribute('y2', String(y(g)));
-    l.setAttribute('stroke', 'rgba(0,0,0,0.08)');
-    svg.append(l);
-  }
-  const path = document.createElementNS(ns, 'path');
-  path.setAttribute('d', d);
-  path.setAttribute('fill', 'url(#yc)');
-  path.setAttribute('opacity', '0.9');
-  svg.append(path);
-  MONTHS.forEach((m, i) => {
-    const t = document.createElementNS(ns, 'text');
-    t.setAttribute('x', String(x(MONTH_START[i] + 15)));
-    t.setAttribute('y', String(H - 3));
-    t.setAttribute('text-anchor', 'middle');
-    t.setAttribute('font-size', '9');
-    t.setAttribute('fill', 'rgba(29,29,31,0.5)');
-    t.textContent = m[0];
-    svg.append(t);
-  });
-  if (mark >= 0) {
-    const l = document.createElementNS(ns, 'line');
-    l.setAttribute('x1', String(x(mark)));
-    l.setAttribute('x2', String(x(mark)));
-    l.setAttribute('y1', String(top - 4));
-    l.setAttribute('y2', String(H - bottom));
-    l.setAttribute('stroke', '#1d1d1f');
-    l.setAttribute('stroke-width', '1.5');
-    svg.append(l);
-  }
-  const lab = document.createElementNS(ns, 'text');
-  lab.setAttribute('x', '2');
-  lab.setAttribute('y', String(y(ymax) + 9));
-  lab.setAttribute('font-size', '9');
-  lab.setAttribute('fill', 'rgba(29,29,31,0.45)');
-  lab.textContent = `${Math.round(ymax * 100)}%`;
-  svg.append(lab);
-  return svg;
-}
-
-function normalsTable(r: DetailResult): HTMLTableElement {
-  const rows: [string, string, (m: DetailResult['months'][number]) => string | undefined][] = [
-    ['Matches', 'Days matching your conditions', (m) => (m.match === undefined ? undefined : String(Math.round(m.match)))],
-    ['Feels hi', 'Average feels-like high', (m) => (m.feels === undefined ? undefined : fmt('temp', m.feels))],
-    ['High', 'Average daytime high', (m) => (m.tmax === undefined ? undefined : fmt('temp', m.tmax))],
-    ['Low', 'Average overnight low', (m) => (m.tmin === undefined ? undefined : fmt('temp', m.tmin))],
-    ['Dew pt', 'Average daytime dew point (humidity)', (m) => (m.dew === undefined ? undefined : fmt('temp', m.dew))],
-    ['Sun h', 'Average hours of sunshine per day', (m) => (m.sun === undefined ? undefined : m.sun.toFixed(1))],
-    ['UV', 'Average daily peak UV index', (m) => (m.uv === undefined ? undefined : String(Math.round(m.uv)))],
-    ['Clear', 'Days with daytime cloud cover ≤ 25%', (m) => (m.sunnyDays === undefined ? undefined : String(Math.round(m.sunnyDays)))],
-    ['Rainy', 'Days with ≥ 1 mm of precipitation', (m) => (m.rainDays === undefined ? undefined : String(Math.round(m.rainDays)))],
-    [`Precip ${unitLabel('precip')}`, 'Total precipitation in the month', (m) => (m.precip === undefined ? undefined : fmt('precip', m.precip, false))],
-    ['Snowy', 'Days with ≥ 1 cm of snow on the ground', (m) => (m.snowDays === undefined ? undefined : String(Math.round(m.snowDays)))],
-    [`Wind ${unitLabel('speed')}`, 'Average strongest daytime wind', (m) => (m.wind === undefined ? undefined : fmt('speed', m.wind, false))],
-    ['Sea', 'Average nearby sea surface temperature', (m) => (m.sst === undefined ? undefined : fmt('temp', m.sst))],
-  ];
-  const t = h('table', { class: 'normals' });
-  const head = h('tr', {}, h('th', {}, ''));
-  MONTHS.forEach((m) => head.append(h('th', {}, m[0])));
-  t.append(h('thead', {}, head));
-  const body = h('tbody');
-  for (const [label, title, f] of rows) {
-    const cells = r.months.map(f);
-    if (cells.every((c) => c === undefined)) continue;
-    const tr = h('tr', { title }, h('td', {}, label));
-    cells.forEach((c) => tr.append(h('td', {}, c ?? '—')));
-    body.append(tr);
-  }
-  t.append(body);
-  return t;
 }
 
 export { cssGradient };

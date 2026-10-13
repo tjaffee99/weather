@@ -51,6 +51,15 @@ export interface MonthStats {
   sun: number; // average hours of sunshine per day
   uv: number; // average daily peak UV index
   match: number; // matching days per month
+  /** the conditions that rule out the most days this month, worst first */
+  why: Obstacle[];
+}
+
+/** A condition that rules days out: which side it misses on and on what share of days. */
+export interface Obstacle {
+  v: CritVar;
+  dir: 'low' | 'high';
+  frac: number;
 }
 
 export interface DetailResult {

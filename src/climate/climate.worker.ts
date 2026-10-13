@@ -9,7 +9,7 @@
  */
 import { fetchBinary } from '../data';
 import { decodeVar, parseCells, checksum, type CellsInfo } from './codec';
-import { DZ0, DZ_STEP, LAPSE, LEVELS, type ClimVar, type ClimateMeta, type Criterion, type DetailResult, type MonthStats } from './types';
+import { DZ0, DZ_STEP, LAPSE, LEVELS, type ClimVar, type ClimateMeta, type Criterion, type DetailResult, type MonthStats, type Obstacle, type CritVar } from './types';
 import { blendTaps, levelOf } from './blend';
 
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
@@ -120,7 +120,19 @@ function bandFraction(v: number, step: number, lo: number, hi: number): number {
   return b > a ? (b - a) / step : 0;
 }
 
+/** One condition on its own, for explaining what rules days out (location card). */
+interface Cond {
+  v: CritVar;
+  lo: number;
+  hi: number;
+  /** how well day i meets this condition (0..1); temperatures between levels l0, l1 */
+  weight(i: number, row: number, d: number, l0: number, l1: number, f: number): number;
+  /** the day's value in the condition's units (temperatures shifted to the point) */
+  value(i: number, row: number, d: number, shift: number): number;
+}
+
 interface Prepared {
+  conds: Cond[];
   plain: { arr: Uint8Array; lut: Float32Array }[];
   /** temperatures, shifted to each elevation level: lut[level * 256 + code] */
   temps: { arr: Uint8Array; lut: Float32Array; lmin: Int8Array; lmax: Int8Array }[];
@@ -128,13 +140,22 @@ interface Prepared {
 }
 
 function prepare(crit: Criterion[]): Prepared {
-  const p: Prepared = { plain: [], temps: [] };
+  const p: Prepared = { conds: [], plain: [], temps: [] };
   for (const c of crit) {
     if (c.v === 'daylight') {
       p.daylight = [c.lo, c.hi];
+      p.conds.push({
+        v: c.v, lo: c.lo, hi: c.hi,
+        weight: (_i, row, d) => {
+          const h = daylight[row * meta.days + d];
+          return h < c.lo || h > c.hi ? 0 : 1;
+        },
+        value: (_i, row, d) => daylight[row * meta.days + d],
+      });
       continue;
     }
     const arr = data[c.v]!;
+    const decode = (code: number) => decodeValue(c.v as ClimVar, code);
     if (TEMP_VARS.includes(c.v)) {
       const vm = meta.vars[c.v];
       const lut = new Float32Array(LEVELS * 256);
@@ -149,8 +170,15 @@ function prepare(crit: Criterion[]): Prepared {
             lmax[k] = Math.max(lmax[k], l);
           }
       p.temps.push({ arr, lut, lmin, lmax });
+      p.conds.push({
+        v: c.v, lo: c.lo, hi: c.hi,
+        weight: (i, _row, _d, l0, l1, f) => (1 - f) * lut[l0 * 256 + arr[i]] + f * lut[l1 * 256 + arr[i]],
+        value: (i, _row, _d, shift) => arr[i] * vm.scale! + vm.offset! + shift,
+      });
     } else {
-      p.plain.push({ arr, lut: plainLut(c) });
+      const lut = plainLut(c);
+      p.plain.push({ arr, lut });
+      p.conds.push({ v: c.v, lo: c.lo, hi: c.hi, weight: (i) => lut[arr[i]], value: (i) => decode(arr[i]) });
     }
   }
   return p;
@@ -319,6 +347,8 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
   const p = prepare(crit);
   const match = new Float32Array(days);
   const loaded = (Object.keys(data) as ClimVar[]).filter((v) => data[v]);
+  // what rules days out: per month, condition and direction, the share of days failing it
+  const fails = Array.from({ length: 12 }, () => new Float64Array(p.conds.length * 2));
   const sums: Record<string, number>[] = Array.from({ length: 12 }, () => ({}));
   const wsum: Record<string, number>[] = Array.from({ length: 12 }, () => ({}));
   const add = (m: number, k: string, v: number | undefined, w: number) => {
@@ -335,8 +365,17 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
     const lvl = levelOf(t.dz);
     const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
     const m1 = new Float32Array(days);
-    for (let d = 0; d < days; d++) {
+    for (let d = 0, m = 0; d < days; d++) {
       const i = c * days + d;
+      while (d >= MONTH_START[m + 1]) m++;
+      p.conds.forEach((q, k) => {
+        const miss = 1 - q.weight(i, cellRow[c], d, l0, l1, f);
+        if (miss <= 0) return;
+        // which side it misses on: the nearer bound
+        const v = q.value(i, cellRow[c], d, shift);
+        const low = !Number.isFinite(q.hi) || (Number.isFinite(q.lo) && v - q.lo < q.hi - v);
+        fails[m][k * 2 + (low ? 0 : 1)] += (w * miss) / (MONTH_START[m + 1] - MONTH_START[m]);
+      });
       const pw = plainWeight(p, i, cellRow[c], d);
       if (pw === 0) continue;
       m1[d] = pw * ((1 - f) * tempWeight(p, i, l0) + f * tempWeight(p, i, l1));
@@ -397,7 +436,15 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
   const months = sums.map((sm, m) => {
     const st: Record<string, number> = {};
     for (const k of Object.keys(sm)) st[k] = sm[k] / wsum[m][k];
-    return st as Partial<MonthStats>;
+    const why: Obstacle[] = [];
+    p.conds.forEach((q, k) => {
+      for (const dir of [0, 1]) {
+        const frac = fails[m][k * 2 + dir];
+        if (frac >= 0.05) why.push({ v: q.v, dir: dir ? 'high' : 'low', frac });
+      }
+    });
+    why.sort((a, b) => b.frac - a.frac);
+    return { ...st, why: why.slice(0, 3) } as Partial<MonthStats>;
   });
   const perYear = match.reduce((s, x) => s + x, 0) * (365 / days);
   const mc = cellIndex[main.p];

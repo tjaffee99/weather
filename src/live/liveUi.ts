@@ -228,7 +228,7 @@ export class LiveUI {
     placeP
       .then((p) => {
         if (token !== this.cardToken) return;
-        title.textContent = p?.name ?? 'Open water';
+        title.textContent = p?.name ?? 'Selected location';
         sub.textContent = [p?.detail, coordLabel(lon, lat)].filter(Boolean).join(' · ');
       })
       .catch(() => (title.textContent = 'Selected location'));
@@ -264,7 +264,8 @@ function renderForecast(fc: PointForecast, at: number): Node[] {
   const cond = cur.code >= 0 ? condition(cur.code, cur.isDay) : null;
   const day = [...fc.daily].reverse().find((d) => d.t <= cur.t);
   const hl = day ? `H ${fmt('temp', day.max)}  L ${fmt('temp', day.min)}` : '';
-  const stat = (k: string, v: string) => h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v));
+  const stat = (k: string, v: string, note?: string) =>
+    h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), note ? h('div', { class: 'n' }, note) : null);
   const hrs = threeHourly(fc, i0);
   const hourLabel = (t: number, i: number) => {
     if (i === 0) return live ? 'Now' : fmtLocal(t, tz, { hour: 'numeric' });
@@ -292,12 +293,12 @@ function renderForecast(fc: PointForecast, at: number): Node[] {
     h(
       'div',
       { class: 'stats' },
-      stat('Wind', cur.wind !== undefined ? `${fmt('speed', cur.wind)}${cur.gust ? ` · gusts ${fmt('speed', cur.gust, false)}` : ''}` : '—'),
-      stat('Humidity', cur.humidity !== undefined ? fmt('percent', cur.humidity) : '—'),
-      stat('Cloud cover', cur.cloud !== undefined ? fmt('percent', cur.cloud) : '—'),
+      stat('Wind', cur.wind !== undefined ? `${fmt('speed', cur.wind)}${cur.gust ? ` · gusts ${fmt('speed', cur.gust, false)}` : ''}` : '—', cur.wind !== undefined ? windWord(cur.wind) : undefined),
+      stat('Humidity', cur.humidity !== undefined ? fmt('percent', cur.humidity) : '—', cur.humidity !== undefined ? humidWord(cur.temp, cur.humidity) : undefined),
+      stat('Cloud cover', cur.cloud !== undefined ? fmt('percent', cur.cloud) : '—', cur.cloud !== undefined ? cloudWord(cur.cloud) : undefined),
       stat('Precipitation', precipTxt),
       ...(day?.sun !== undefined ? [stat('Sunshine today', `${day.sun.toFixed(1)} h`)] : []),
-      ...(day?.uv !== undefined ? [stat('UV index', `${Math.round(day.uv)}${day.uv >= 8 ? ' · very high' : day.uv >= 6 ? ' · high' : day.uv >= 3 ? ' · moderate' : ' · low'}`)] : []),
+      ...(day?.uv !== undefined ? [stat('UV index today', `${Math.round(day.uv)}`, uvAdvice(day.uv))] : []),
     ),
     h(
       'div',
@@ -412,4 +413,22 @@ function hourlyStrip(hrs: Hour[], label: (t: number, i: number) => string): HTML
     );
   });
   return h('div', { class: 'hourly' }, cols, svg);
+}
+
+/** Plain words for the stat boxes. */
+function windWord(kmh: number): string {
+  return kmh < 2 ? 'calm' : kmh < 12 ? 'light air' : kmh < 29 ? 'breezy' : kmh < 39 ? 'windy' : kmh < 62 ? 'very windy' : 'stormy';
+}
+function cloudWord(pct: number): string {
+  return pct < 10 ? 'clear' : pct < 35 ? 'mostly clear' : pct < 70 ? 'partly cloudy' : pct < 90 ? 'mostly cloudy' : 'overcast';
+}
+/** How the air feels, from the dew point (relative humidity alone depends on temperature). */
+function humidWord(tempC: number, rh: number): string {
+  const a = 17.62, b = 243.12;
+  const g = Math.log(Math.max(1, rh) / 100) + (a * tempC) / (b + tempC);
+  const dew = (b * g) / (a - g);
+  return dew < 10 ? 'dry' : dew < 16 ? 'comfortable' : dew < 20 ? 'humid' : dew < 24 ? 'muggy' : 'oppressive';
+}
+function uvAdvice(uv: number): string {
+  return uv < 3 ? 'low' : uv < 6 ? 'moderate · sunscreen' : uv < 8 ? 'high · cover up midday' : uv < 11 ? 'very high · avoid midday sun' : 'extreme · stay in shade';
 }
