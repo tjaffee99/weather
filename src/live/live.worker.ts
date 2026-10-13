@@ -1,6 +1,7 @@
 /// <reference lib="webworker" />
 import { fetchField, NO_SEA, type Cycle, type LiveVar } from './gfs';
 import { hrrrSnow, type ConicGrid, type HrrrDomain } from './hrrr';
+import { aqiField } from './aerosol';
 
 export interface LiveRequest {
   id: number;
@@ -33,8 +34,8 @@ self.onmessage = async (e: MessageEvent<LiveRequest>) => {
       (self as unknown as Worker).postMessage(msg, r ? [r.values.buffer] : []);
       return;
     }
-    if (v === 'sun' || v === 'uv' || v === 'uvmax') {
-      const out = await (v === 'sun' ? sunshineHours(cycle, fh) : v === 'uv' ? uvIndexAt(cycle, fh) : uvIndexPeak(cycle, fh));
+    if (v === 'sun' || v === 'uv' || v === 'uvmax' || v === 'aqi') {
+      const out = await (v === 'sun' ? sunshineHours(cycle, fh) : v === 'uv' ? uvIndexAt(cycle, fh) : v === 'uvmax' ? uvIndexPeak(cycle, fh) : aqiField(cycle.time + fh * 3600_000));
       (self as unknown as Worker).postMessage({ id, values: out, nx: 1440, ny: 721 } satisfies LiveResponse, [out.buffer]);
       return;
     }
@@ -56,6 +57,12 @@ self.onmessage = async (e: MessageEvent<LiveRequest>) => {
       case 'precip':
         for (let i = 0; i < n; i++) out[i] = src[i] * 3600; // kg m-2 s-1 -> mm/h
         break;
+      case 'snowfall': {
+        // cm of snow per day at the current rate (10:1 snow to water)
+        const snow = fields[1].values;
+        for (let i = 0; i < n; i++) out[i] = snow[i] > 0.5 ? src[i] * 86400 : 0;
+        break;
+      }
       case 'snow':
         for (let i = 0; i < n; i++) out[i] = Number.isNaN(src[i]) ? 0 : src[i] * 100; // m -> cm
         break;

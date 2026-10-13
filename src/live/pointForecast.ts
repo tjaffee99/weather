@@ -23,6 +23,16 @@ export interface PointForecast {
   timezone?: string;
   hours: Hour[];
   daily: { t: number; max: number; min: number; sun?: number; uv?: number }[];
+  /** current air quality, when available */
+  air?: { aqi: number; pm25: number };
+}
+
+/** Current US AQI and PM2.5 from Open-Meteo's air quality service (CAMS models). */
+export async function openMeteoAir(lat: number, lon: number): Promise<{ aqi: number; pm25: number } | null> {
+  const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}&current=us_aqi,pm2_5`;
+  const j = await (await fetch(url)).json();
+  const c = j?.current;
+  return c && Number.isFinite(c.us_aqi) ? { aqi: c.us_aqi, pm25: c.pm2_5 } : null;
 }
 
 export async function openMeteo(lat: number, lon: number, signal?: AbortSignal): Promise<PointForecast> {

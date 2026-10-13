@@ -6,10 +6,12 @@
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import { findLatestCycle, type Cycle, type LiveVar } from './gfs';
 import { HRRR_DOMAINS, type ConicGrid, type HrrrDomain } from './hrrr';
+import { ObservedLayers, type ObsKind } from './observed';
+import { WEATHER_BEFORE } from '../map/style';
 import type { LiveRequest, LiveResponse } from './live.worker';
 import type { FieldLayer, GridSpec } from '../map/fieldLayer';
 import type { WindParticles } from '../map/windParticles';
-import { CLOUD, HUMIDITY, PRECIP, SNOWFALL, SNOW_DEPTH, TEMPERATURE, UV_INDEX, WIND, type Palette } from '../map/palettes';
+import { AQI, CLOUD, HUMIDITY, PRECIP, SNOWFALL, SNOW_DEPTH, TEMPERATURE, UV_INDEX, WIND, type Palette } from '../map/palettes';
 import { demAt, type City, type Dem } from '../data';
 import { codeFromFields, isDaytime, type Hour, type PointForecast } from './pointForecast';
 import { fmt, type Quantity } from '../units';
@@ -31,14 +33,21 @@ export interface LayerDef {
   legendImperial?: number[]; // tick values in imperial display units
   /** shown as a toggle under that layer's button instead of its own button */
   variantOf?: LiveVar;
+  /** this layer's name in its variant toggle (default: its label) */
+  toggleLabel?: string;
+  /** observed imagery (radar, satellite) instead of a forecast field */
+  observed?: ObsKind;
 }
 
 export const LIVE_LAYERS: LayerDef[] = [
-  { id: 'temp', label: 'Temperature', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90] },
+  { id: 'temp', label: 'Temperature', toggleLabel: 'Actual', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90] },
   { id: 'feels', label: 'Feels like', icon: '🌡', palette: TEMPERATURE, q: 'temp', lapse: true, legend: [-40, -20, 0, 20, 40], legendImperial: [-40, 0, 32, 60, 90], variantOf: 'temp' },
-  { id: 'precip', label: 'Precipitation', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25], legendImperial: [0.01, 0.05, 0.2, 1] },
-  { id: 'cloud', label: 'Clouds', icon: '☁', palette: CLOUD, q: 'percent', lapse: false, legend: [0, 50, 100] },
+  { id: 'precip', label: 'Precipitation', toggleLabel: 'Forecast', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25], legendImperial: [0.01, 0.05, 0.2, 1] },
+  { id: 'radar', label: 'Radar', icon: '☔', palette: PRECIP, alt: SNOWFALL, q: 'rate', lapse: false, legend: [0.1, 1, 5, 25], legendImperial: [0.01, 0.05, 0.2, 1], variantOf: 'precip', observed: 'radar' },
+  { id: 'cloud', label: 'Clouds', toggleLabel: 'Forecast', icon: '☁', palette: CLOUD, q: 'percent', lapse: false, legend: [0, 50, 100] },
+  { id: 'satellite', label: 'Satellite', icon: '☁', palette: CLOUD, q: 'percent', lapse: false, legend: [0, 50, 100], variantOf: 'cloud', observed: 'satellite' },
   { id: 'uv', label: 'UV index', icon: '🔆', palette: UV_INDEX, q: 'index', lapse: false, legend: [0, 3, 6, 8, 11] },
+  { id: 'aqi', label: 'Air quality', icon: '🌫', palette: AQI, q: 'index', lapse: false, legend: [0, 50, 100, 150, 200, 300] },
   { id: 'snow', label: 'Snow depth', icon: '❄', palette: SNOW_DEPTH, q: 'snow', lapse: false, legend: [1, 10, 50, 200], legendImperial: [1, 4, 20, 80] },
   { id: 'wind', label: 'Wind', icon: '🌬', palette: WIND, q: 'speed', lapse: false, legend: [0, 20, 50, 100], legendImperial: [0, 10, 30, 60] },
   { id: 'humidity', label: 'Humidity', icon: '💧', palette: HUMIDITY, q: 'percent', lapse: false, legend: [0, 50, 100] },
@@ -104,7 +113,9 @@ export class LiveController {
     private field: FieldLayer,
     private dem: Dem,
     private cities: City[],
-  ) {}
+  ) {
+    this.obs = new ObservedLayers(map, WEATHER_BEFORE);
+  }
 
   async init() {
     this.onStatus('Finding the latest GFS model run…', true);
@@ -149,13 +160,39 @@ export class LiveController {
     this.active = true;
     // force a fresh upload so the field fades in with the right palette
     this.shown = { a: '', b: '', alt: '' };
-    this.show(this.time, true);
+    if (this.layer.observed) this.showObserved();
+    else this.show(this.time, true);
   }
 
   deactivate() {
     this.active = false;
     this.particles?.setEnabled(false);
     this.setGlaciers(false);
+    this.obs.deactivate();
+  }
+
+  /** Radar / satellite imagery: the forecast field fades out and the frames take over. */
+  obs: ObservedLayers;
+
+  private async showObserved() {
+    const kind = this.layer.observed!;
+    this.loadToken++;
+    this.particles?.setEnabled(false);
+    this.setGlaciers(false);
+    this.updateRegional();
+    this.field.fadeTo(0, 160);
+    this.onSwap();
+    const slow = setTimeout(() => this.onStatus(`Loading ${this.layer.label.toLowerCase()}…`, true), 150);
+    try {
+      await this.obs.activate(kind);
+      if (!this.active || this.layer.observed !== kind) return;
+      this.onStatus('', false);
+      this.onTimeRange();
+    } catch (e) {
+      this.onStatus(`Could not load ${this.layer.label.toLowerCase()}: ${(e as Error).message}`, false);
+    } finally {
+      clearTimeout(slow);
+    }
   }
 
   private setGlaciers(on: boolean) {
@@ -175,14 +212,20 @@ export class LiveController {
 
   /** Switch layer: the old layer stays on screen until the new data is ready, then cross-fades. */
   setLayer(id: LiveVar) {
+    const was = this.layer;
     this.layer = LIVE_LAYERS.find((l) => l.id === id)!;
     this.shown = { a: '', b: '', alt: '' };
+    if (this.layer.observed) return this.showObserved();
+    if (was.observed) {
+      this.obs.deactivate();
+      this.onTimeRange();
+    }
     this.show(this.time, true);
   }
 
   /** Display valid time t (ms); cross-fades between the two bracketing hours. */
   async show(t: number, swap = false) {
-    if (!this.cycle) return;
+    if (!this.cycle || this.layer.observed) return;
     this.time = Math.min(this.maxTime, Math.max(this.minTime, t));
     const rel = (this.time - this.cycle.time) / HOUR;
     const fhA = Math.max(0, Math.floor(rel));

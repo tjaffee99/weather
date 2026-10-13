@@ -44,6 +44,16 @@ export const CRITERIA: CritDef[] = [
     def: [-Infinity, 16], // above ~16 °C (61 °F) dew point air starts to feel sticky
   },
   {
+    v: 'rh', group: 'Sky & air', label: 'Relative humidity', hint: 'Daytime average (9 am to 6 pm); dew point says more about comfort', q: 'percent', kind: 'continuous',
+    metric: { min: 0, max: 100, step: 5 }, imperial: { min: 0, max: 100, step: 5 }, file: 'rh',
+    def: [-Infinity, 70], // not clammy
+  },
+  {
+    v: 'aqi', group: 'Sky & air', label: 'Air quality', hint: 'US AQI from PM2.5: 50 or less good, 100 or less moderate (model estimate)', q: 'index', kind: 'continuous',
+    metric: { min: 0, max: 300, step: 10 }, imperial: { min: 0, max: 300, step: 10 }, file: 'aqi',
+    def: [-Infinity, 100], // fine for everyone except unusually sensitive people
+  },
+  {
     v: 'cloud', group: 'Sky & air', label: 'Cloud cover', hint: 'Average from 9 am to 6 pm', q: 'percent', kind: 'continuous',
     metric: { min: 0, max: 100, step: 10 }, imperial: { min: 0, max: 100, step: 10 }, file: 'cloud',
     def: [-Infinity, 40], // mostly sunny
@@ -72,6 +82,11 @@ export const CRITERIA: CritDef[] = [
     v: 'snow', group: 'Snow & sea', label: 'Snow on the ground', hint: 'Snow depth', q: 'snow', kind: 'bins',
     edges: [1, 2.5, 5, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 400, 500], file: 'snow',
     def: [20, Infinity], // a proper white landscape (8 in)
+  },
+  {
+    v: 'snowfall', group: 'Snow & sea', label: 'Fresh snow', hint: 'Snowfall during the day (a powder day is 10 cm or more)', q: 'snow', kind: 'bins',
+    edges: [0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 40, 50, 75, 100, 150], file: 'snowfall',
+    def: [10, Infinity], // a powder day (4 in)
   },
   {
     v: 'sst', group: 'Snow & sea', label: 'Sea temperature', hint: 'Nearby ocean; coastal places only', q: 'temp', kind: 'continuous',

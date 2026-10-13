@@ -5,7 +5,7 @@ import { renderLegend } from '../ui/legend';
 import { cssGradient } from '../map/palettes';
 import { coordLabel, timeLabel } from '../ui/format';
 import { colorAt, GLACIER, TEMPERATURE } from '../map/palettes';
-import { condition, openMeteo, type Hour, type PointForecast } from './pointForecast';
+import { condition, openMeteo, openMeteoAir, type Hour, type PointForecast } from './pointForecast';
 import { pointElevation } from '../map/localDem';
 import { demAt, type Dem } from '../data';
 import type { Place } from '../geocode';
@@ -19,8 +19,9 @@ export class LiveUI {
   private range?: HTMLInputElement;
   private label?: HTMLElement;
   private cardToken = 0;
-  /** last chosen variant per layer (e.g. temperature → feels like) */
-  private variant = new Map<LiveVar, LiveVar>();
+  /** last chosen variant per layer (e.g. temperature → feels like); clouds open on the satellite view */
+  private variant = new Map<LiveVar, LiveVar>([['cloud', 'satellite']]);
+  private obsTimer = 0;
 
   constructor(
     private c: LiveController,
@@ -44,6 +45,7 @@ export class LiveUI {
 
   exit() {
     this.stop();
+    this.stopObs();
   }
 
   refreshUnits() {
@@ -91,7 +93,7 @@ export class LiveUI {
             'div',
             { class: 'seg layer-variant', role: 'group', 'aria-label': `${l.label} type` },
             ...[l, ...variants].map((x) =>
-              h('button', { 'aria-selected': String(cur.id === x.id), onclick: () => pick(x.id) }, x.variantOf ? x.label : 'Actual'),
+              h('button', { 'aria-selected': String(cur.id === x.id), onclick: () => pick(x.id) }, x.toggleLabel ?? x.label),
             ),
           ),
         );
@@ -115,6 +117,15 @@ export class LiveUI {
 
   renderLegend() {
     const l = this.c.layer;
+    if (l.id === 'satellite') {
+      // infrared shows cloud-top temperature: thin or low cloud is faint, high storm tops brightest
+      renderLegend(this.els.legend, 'Satellite clouds', 'infrared', l.palette, [
+        { value: 0, label: 'clear' },
+        { value: 50, label: 'cloud' },
+        { value: 100, label: 'high, thick' },
+      ]);
+      return;
+    }
     let note: Node | undefined;
     if (l.id === 'snow') {
       const sw = h('i');
@@ -124,7 +135,7 @@ export class LiveUI {
     renderLegend(
       this.els.legend,
       l.label,
-      unitLabel(l.q),
+      l.id === 'aqi' ? 'US AQI · PM2.5' : unitLabel(l.q),
       l.palette,
       units.imperial && l.legendImperial
         ? l.legendImperial.map((d) => ({ value: fromDisplay(l.q, d), label: l.q === 'temp' ? `${d}°` : String(d) }))
@@ -137,6 +148,8 @@ export class LiveUI {
     const b = this.els.bottom;
     clear(b);
     const c = this.c;
+    if (c.layer.observed) return this.renderObsTimeline();
+    this.stopObs();
     if (!c.cycle) return;
     const steps = Math.round((c.maxTime - c.minTime) / (HOUR / 4));
     this.range = h('input', {
@@ -176,6 +189,70 @@ export class LiveUI {
         ticks,
       ),
     );
+  }
+
+  /** Radar / satellite: step through the observed frames (past 2 h of radar, 24 h of satellite). */
+  private renderObsTimeline() {
+    const b = this.els.bottom;
+    const o = this.c.obs;
+    this.stop();
+    if (!o.frames.length) {
+      b.append(h('div', { class: 'timeline' }, h('div', { class: 'timeline-top' }, h('span', { class: 'timeline-label' }, 'Loading…'))));
+      return;
+    }
+    const n = o.frames.length;
+    const label = h('span', { class: 'timeline-label' });
+    const ago = (t: number) => {
+      const m = Math.round((Date.now() - t) / 60000);
+      return m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+    };
+    const setLabel = () => (label.textContent = `${timeLabel(o.frames[o.index].time)} · ${ago(o.frames[o.index].time)}`);
+    const range = h('input', {
+      type: 'range',
+      class: 'single-range',
+      min: 0,
+      max: n - 1,
+      step: 1,
+      value: o.index,
+      'aria-label': o.kind === 'radar' ? 'Radar time' : 'Satellite time',
+      oninput: () => {
+        this.stopObs();
+        o.show(+range.value);
+        setLabel();
+      },
+    });
+    setLabel();
+    const ticks = h('div', { class: 'ticks' });
+    const first = h('span', {}, ago(o.frames[0].time));
+    first.style.left = '0%';
+    first.classList.add('edge-l');
+    const last = h('span', { class: 'now' }, 'latest ▲');
+    last.style.left = '100%';
+    last.classList.add('edge-r');
+    ticks.append(first, last);
+    const play = h('button', { class: 'play', 'aria-label': 'Play' }, '▶');
+    play.onclick = () => {
+      if (this.obsTimer) return this.stopObs();
+      play.textContent = '❚❚';
+      const step = async () => {
+        // loop through the frames; each waits until its imagery has loaded
+        await o.show(o.index >= n - 1 ? 0 : o.index + 1);
+        if (!this.obsTimer) return;
+        range.value = String(o.index);
+        setLabel();
+        this.obsTimer = window.setTimeout(step, o.index === n - 1 ? 1200 : o.kind === 'radar' ? 350 : 500);
+      };
+      this.obsTimer = window.setTimeout(step, 0);
+    };
+    const src = o.kind === 'radar' ? 'Radar · RainViewer' : 'Infrared satellites · EUMETSAT';
+    b.append(play, h('div', { class: 'timeline' }, h('div', { class: 'timeline-top' }, label, h('span', { class: 'timeline-sub' }, src)), range, ticks));
+  }
+
+  private stopObs() {
+    if (this.obsTimer) clearTimeout(this.obsTimer);
+    this.obsTimer = 0;
+    const btn = this.els.bottom.querySelector('.play');
+    if (btn && this.c.layer.observed) btn.textContent = '▶';
   }
 
   private syncTime() {
@@ -234,6 +311,7 @@ export class LiveUI {
       .catch(() => (title.textContent = 'Selected location'));
 
     let fc: PointForecast | null = null;
+    const airP = openMeteoAir(lat, lon).catch(() => null);
     try {
       fc = await openMeteo(lat, lon);
     } catch {
@@ -246,6 +324,8 @@ export class LiveUI {
       }
     }
     if (token !== this.cardToken || !fc.hours.length) return;
+    // only for the current hour: the air quality service gives today's readings
+    if (Math.abs(at - Date.now()) < 3 * HOUR_MS) fc.air = (await airP) ?? undefined;
     const elev = await elevP;
     if (elev !== null && token === this.cardToken) sub.textContent += ` · ${Math.round(elev)} m`;
     body.replaceChildren(...renderForecast(fc, at));
@@ -299,6 +379,7 @@ function renderForecast(fc: PointForecast, at: number): Node[] {
       stat('Precipitation', precipTxt),
       ...(day?.sun !== undefined ? [stat('Sunshine today', `${day.sun.toFixed(1)} h`)] : []),
       ...(day?.uv !== undefined ? [stat('UV index today', `${Math.round(day.uv)}`, uvAdvice(day.uv))] : []),
+      ...(fc.air ? [stat('Air quality', `${Math.round(fc.air.aqi)} AQI`, `${aqiAdvice(fc.air.aqi)} · PM2.5 ${Math.round(fc.air.pm25)}`)] : []),
     ),
     h(
       'div',
@@ -428,6 +509,9 @@ function humidWord(tempC: number, rh: number): string {
   const g = Math.log(Math.max(1, rh) / 100) + (a * tempC) / (b + tempC);
   const dew = (b * g) / (a - g);
   return dew < 10 ? 'dry' : dew < 16 ? 'comfortable' : dew < 20 ? 'humid' : dew < 24 ? 'muggy' : 'oppressive';
+}
+function aqiAdvice(a: number): string {
+  return a <= 50 ? 'good' : a <= 100 ? 'moderate' : a <= 150 ? 'unhealthy for sensitive groups' : a <= 200 ? 'unhealthy' : a <= 300 ? 'very unhealthy' : 'hazardous';
 }
 function uvAdvice(uv: number): string {
   return uv < 3 ? 'low' : uv < 6 ? 'moderate · sunscreen' : uv < 8 ? 'high · cover up midday' : uv < 11 ? 'very high · avoid midday sun' : 'extreme · stay in shade';

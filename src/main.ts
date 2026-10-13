@@ -4,6 +4,7 @@ import './styles.css';
 import { baseStyle, WATER, WEATHER_BEFORE } from './map/style';
 import { FieldLayer } from './map/fieldLayer';
 import { landDemTile, LocalDem } from './map/localDem';
+import { radarTile, satelliteTile } from './live/observed';
 import { reverseGeocode } from './geocode';
 import { WindParticles } from './map/windParticles';
 import { loadCities, loadDem, type City, type Dem } from './data';
@@ -39,6 +40,8 @@ function setStatus(msg: string, busy = true, error = false, progress?: number) {
 
 // terrain shading without the sea floor
 maplibregl.addProtocol('landdem', async (params) => ({ data: await landDemTile(params.url) }));
+maplibregl.addProtocol('radar', async (params) => ({ data: await radarTile(params.url) }));
+maplibregl.addProtocol('satir', async (params) => ({ data: await satelliteTile(params.url) }));
 
 // ---------- map ----------
 const map: MlMap = new maplibregl.Map({

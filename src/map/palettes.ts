@@ -129,6 +129,20 @@ export const UV_INDEX: Palette = {
   ],
 };
 
+/** US AQI colours (good green, moderate yellow, then orange, red, purple, maroon); clean air stays faint. */
+export const AQI: Palette = {
+  stops: [
+    [0, '#3fbf5f', 0.12],
+    [25, '#3fbf5f', 0.4],
+    [50, '#9fd24a', 0.65],
+    [75, '#efd23a', 0.85],
+    [100, '#f5a623', 0.95],
+    [150, '#ef5a3c', 1],
+    [200, '#b8327a', 1],
+    [300, '#7e1f5a', 1],
+  ],
+};
+
 export const HUMIDITY: Palette = {
   stops: [
     [0, '#8a5a2b'],

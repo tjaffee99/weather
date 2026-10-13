@@ -3,7 +3,7 @@
  * of a matching day through the year (with what rules days out), and the
  * monthly normals as a colour-coded table.
  */
-import { colorAt, SCORE, TEMPERATURE, UV_INDEX } from '../map/palettes';
+import { AQI, colorAt, SCORE, TEMPERATURE, UV_INDEX } from '../map/palettes';
 import { h } from '../ui/dom';
 import { MONTHS, doyLabel } from '../ui/format';
 import { fmt, unitLabel, units } from '../units';
@@ -20,12 +20,15 @@ const WHY: Record<CritVar, Record<Obstacle['dir'], [string, string]>> = {
   tmax: { low: ['too cold', 'cold'], high: ['too hot', 'hot'] },
   tmin: { low: ['nights too cold', 'cold'], high: ['nights too warm', 'warm'] },
   dew: { low: ['air too dry', 'dry'], high: ['too humid', 'humid'] },
+  rh: { low: ['air too dry', 'dry'], high: ['too humid', 'humid'] },
+  aqi: { low: ['air too clean', 'clean'], high: ['air too polluted', 'smog'] },
   cloud: { low: ['too clear', 'clear'], high: ['too cloudy', 'cloudy'] },
   sun: { low: ['not sunny enough', 'dull'], high: ['too sunny', 'sunny'] },
   uv: { low: ['UV too low', 'UV'], high: ['UV too high', 'UV'] },
   precip: { low: ['too dry', 'dry'], high: ['too wet', 'wet'] },
   wind: { low: ['too calm', 'calm'], high: ['too windy', 'windy'] },
   snow: { low: ['not enough snow', 'thin'], high: ['too much snow', 'deep'] },
+  snowfall: { low: ['no fresh snow', 'no new'], high: ['too much new snow', 'snowy'] },
   sst: { low: ['sea too cold', 'sea'], high: ['sea too warm', 'sea'] },
   daylight: { low: ['days too short', 'dark'], high: ['days too long', 'long'] },
 };
@@ -266,6 +269,9 @@ interface Row {
 function dewWord(c: number): string {
   return c < 10 ? 'dry' : c < 16 ? 'comfortable' : c < 20 ? 'humid' : c < 24 ? 'muggy' : 'oppressive';
 }
+function aqiWord(a: number): string {
+  return a <= 50 ? 'good' : a <= 100 ? 'moderate' : a <= 150 ? 'unhealthy for sensitive groups' : a <= 200 ? 'unhealthy' : a <= 300 ? 'very unhealthy' : 'hazardous';
+}
 function uvWord(u: number): string {
   return u < 3 ? 'low' : u < 6 ? 'moderate' : u < 8 ? 'high' : u < 11 ? 'very high' : 'extreme';
 }
@@ -301,6 +307,13 @@ function sections(): { title: string; rows: Row[] }[] {
           tip: (v, m) => `${LONG_MONTHS[m]}: dew point ${temp(v)}${T.slice(1)}, ${dewWord(v)}`,
           color: (v) => ramp('#0f8a7e', (v - 4) / 20),
         },
+        {
+          key: 'rh',
+          label: 'Humidity %',
+          text: (v) => String(Math.round(v)),
+          tip: (v, m) => `${LONG_MONTHS[m]}: relative humidity averages ${Math.round(v)}% in the daytime`,
+          color: (v) => ramp('#0f8a7e', (v - 20) / 75),
+        },
       ],
     },
     {
@@ -316,7 +329,15 @@ function sections(): { title: string; rows: Row[] }[] {
       rows: [
         { key: 'rainDays', label: 'Wet days', text: (v) => String(Math.round(v)), tip: (v, m) => `${LONG_MONTHS[m]}: ${Math.round(v)} days with ${fmt('precip', 1)} or more of rain or snow`, color: (v, m) => ramp('#2f78c4', (v / DAYS_IN_MONTH[m]) * 1.6) },
         { key: 'precip', label: `Total ${mm}`, text: (v) => fmt('precip', v, false), tip: (v, m) => `${LONG_MONTHS[m]}: ${fmt('precip', v)} of rain and melted snow in all`, color: (v) => ramp('#2f78c4', v / 200) },
+        { key: 'snowfall', label: `Snowfall ${units.imperial ? 'in' : 'cm'}`, text: (v) => fmt('snow', v, false), tip: (v, m) => `${LONG_MONTHS[m]}: ${fmt('snow', v)} of snow falls in all`, color: (v) => ramp('#7a6fe0', v / 60) },
         { key: 'snowDays', label: 'Snow cover', text: (v) => String(Math.round(v)), tip: (v, m) => `${LONG_MONTHS[m]}: snow on the ground on ${Math.round(v)} days`, color: (v, m) => ramp('#7a6fe0', v / DAYS_IN_MONTH[m]) },
+      ],
+    },
+    {
+      title: 'Air (model estimate)',
+      rows: [
+        { key: 'aqi', label: 'Air quality', text: (v) => String(Math.round(v)), tip: (v, m) => `${LONG_MONTHS[m]}: US AQI averages ${Math.round(v)} (${aqiWord(v)}), from PM2.5`, color: (v) => soften(colorAt(AQI, v), 0.25) },
+        { key: 'goodAirDays', label: 'Good-air days', text: (v) => String(Math.round(v)), tip: (v, m) => `${LONG_MONTHS[m]}: ${Math.round(v)} days with good air (AQI 50 or less)`, color: (v, m) => ramp('#3fa35f', v / DAYS_IN_MONTH[m]) },
       ],
     },
     {

@@ -46,6 +46,9 @@ const NOW: Record<CritVar, { v: LiveVar | null; kind: number; soft: number; labe
   sst: { v: 'sst', kind: 0, soft: 0.5 },
   sun: { v: 'sun', kind: 0, soft: 0.3, label: 'Sunshine today' },
   uv: { v: 'uvmax', kind: 0, soft: 0.4, label: 'UV index today' },
+  rh: { v: 'humidity', kind: 0, soft: 3, label: 'Humidity now' },
+  aqi: { v: 'aqi', kind: 0, soft: 4, label: 'Air quality now' },
+  snowfall: { v: 'snowfall', kind: 0, soft: 0.5, label: 'Snowing now (per day)' },
   daylight: { v: null, kind: 3, soft: 0.2 },
 };
 
@@ -802,14 +805,14 @@ export class ClimateUI {
         h('h3', {}, 'Month by month'),
         monthTable(res),
       );
-      const missing = (['cloud', 'dew', 'uv', 'wind', 'snow', 'sst'] as ClimVar[]).filter((v) => !res.loaded.includes(v));
+      const missing = (['cloud', 'dew', 'rh', 'uv', 'aqi', 'wind', 'snow', 'snowfall', 'sst'] as ClimVar[]).filter((v) => !res.loaded.includes(v));
       if (missing.length && this.meta) {
         const mb = missing.reduce((s, v) => s + this.meta!.vars[v].bytes, 0) / 1e6;
         card.append(
           h(
             'button',
             { class: 'chip', style: 'margin-top:10px', onclick: () => this.detail(lon, lat, dem, crit, [...base, ...missing, 'feels', 'tmax', 'tmin', 'precip', 'sun', 'cloud']).then(render) },
-            `+ Clouds, humidity, UV, wind, snow & sea (${mb.toFixed(1)} MB)`,
+            `+ Clouds, humidity, UV, air, wind, snow & sea (${mb.toFixed(1)} MB)`,
           ),
         );
       }

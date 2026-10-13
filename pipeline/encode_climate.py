@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Quantise + compress the ERA5 daily samples for the browser.
 
-Input : <work>/samples_pass0.npz (from era5_climate.py) and static_<res>.npz
-Output: public/data/climate/meta.json, cells.bin, <var>.bin (gzip)
+Input : <work>/samples_pass0.npz (from era5_climate.py) and static_<res>.npz, plus
+        samples_sun / _uv / _extra (era5_climate.py --only-...) and samples_aq (gefs_aq.py)
+Output: public/data/climate/meta.json, cells.bin, <var>.bin (gzip) for the finder,
+        and atlas/<id>.bin: monthly and annual normals per cell for the atlas view
 
 Each variable is one file so the app only downloads what the active criteria
 need. Values are quantised to uint8 codes and predictively coded on the full
@@ -26,6 +28,7 @@ import numpy as np
 PRECIP_EDGES = [0.1, 0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 50, 75, 100, 150]  # mm/day
 WIND_EDGES = [5, 10, 15, 20, 25, 30, 35, 40, 50, 60, 70, 80, 100, 120, 150]  # km/h
 SNOW_EDGES = [1, 2.5, 5, 10, 15, 20, 30, 50, 75, 100, 150, 200, 300, 400, 500]  # cm
+SNOWFALL_EDGES = [0.5, 1, 2, 3, 5, 7.5, 10, 15, 20, 30, 40, 50, 75, 100, 150]  # cm/day
 
 VARS = {
     # id: (source key, encoding)
@@ -42,7 +45,14 @@ VARS = {
     "sun": ("sun", {"type": "linear", "scale": 0.5, "offset": 0.0}),
     # daily peak UV index, half-unit steps
     "uv": ("uv", {"type": "linear", "scale": 0.5, "offset": 0.0}),
+    # daytime (9-18 local) mean relative humidity, %
+    "rh": ("rh", {"type": "linear", "scale": 1.0, "offset": 0.0}),
+    # snowfall in the day, cm (10:1)
+    "snowfall": ("snowfall", {"type": "bins", "edges": SNOWFALL_EDGES}),
+    # US AQI from daily mean PM2.5 (NOAA GEFS-Aerosols, 2021-2025), steps of 2
+    "aqi": ("aqi", {"type": "linear", "scale": 2.0, "offset": 0.0}),
 }
+MONTH_START = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365]
 BLOCK = 3
 # ERA5 rains lightly far too often ("drizzle bias"): days with >= 1 mm are
 # over-counted by ~30-50% versus station records. Subtracting 1 mm/day makes
@@ -122,6 +132,13 @@ def main():
     uv_path = os.path.join(a.work, "samples_uv.npz")
     if os.path.exists(uv_path):  # produced by era5_climate.py --only-uv
         smp["uv"] = np.load(uv_path)["uv"]
+    extra_path = os.path.join(a.work, "samples_extra.npz")
+    if os.path.exists(extra_path):  # era5_climate.py --only-extra
+        ex = np.load(extra_path)
+        smp["rh"], smp["snowfall"] = ex["rh"], ex["snowfall"]
+    aq_path = os.path.join(a.work, "samples_aq.npz")
+    if os.path.exists(aq_path):  # gefs_aq.py
+        smp["aqi"] = np.load(aq_path)["aqi"]
     land, elev, lat, lon = st["land"], st["elev"], st["lat"], st["lon"]
     R, C = land.shape
     mask = land > a.min_land
@@ -169,9 +186,64 @@ def main():
         checksum = int((cm.ravel() * (np.arange(cm.size, dtype=np.uint64) % 65521 + 1)).sum() % (2**52))
         meta["vars"][vid] = {**enc, "file": f"{vid}.bin", "bytes": len(blob), "mode": mode, "checksum": checksum}
         print(f"{vid:7s} mode {mode} {len(blob)/1e6:6.2f} MB")
+    meta["atlas"] = atlas(smp, mask, os.path.join(a.out, "atlas"))
     with open(os.path.join(a.out, "meta.json"), "w") as f:
         json.dump(meta, f, separators=(",", ":"))
     print(f"cells {ncells}, total {total/1e6:.2f} MB")
+
+
+def atlas(smp: dict, mask: np.ndarray, out: str) -> dict:
+    """Monthly and annual normals per cell, from the raw (unquantised) daily samples.
+
+    Each file is int16 [13][ncells] (Jan..Dec, then the year), value = stored * scale,
+    -32768 where there is no data (sea temperature inland). "mean" variables are
+    averaged over the period, "sum" variables added up over it (hours, mm, days).
+    """
+    os.makedirs(out, exist_ok=True)
+    days = smp["tmax"].shape[0]
+    defs = {
+        "tmean": ("mean", 0.1, lambda: (smp["tmax"] + smp["tmin"]) / 2),
+        "tmax": ("mean", 0.1, lambda: smp["tmax"]),
+        "tmin": ("mean", 0.1, lambda: smp["tmin"]),
+        "feels": ("mean", 0.1, lambda: smp["feels_max"]),
+        "sun": ("sum", 1.0, lambda: smp["sun"]),
+        "uv": ("mean", 0.1, lambda: smp["uv"]),
+        "cloud": ("mean", 0.1, lambda: smp["cloud"]),
+        "precip": ("sum", 1.0, lambda: smp["precip"]),
+        # wet days as the finder counts them (>= 1 mm after the drizzle correction)
+        "wetdays": ("sum", 0.1, lambda: (smp["precip"] - DRIZZLE_OFFSET_MM >= 1).astype(np.float32)),
+        "snowfall": ("sum", 1.0, lambda: smp["snowfall"]),
+        "snowdays": ("sum", 0.1, lambda: (smp["snow"] >= 1).astype(np.float32)),
+        "dew": ("mean", 0.1, lambda: smp["dew"]),
+        "rh": ("mean", 0.1, lambda: smp["rh"]),
+        "wind": ("mean", 0.1, lambda: smp["wind"]),
+        "sst": ("mean", 0.1, lambda: smp["sst"]),
+        "aqi": ("mean", 0.1, lambda: smp["aqi"]),
+        "goodair": ("sum", 0.1, lambda: (smp["aqi"] <= 50).astype(np.float32)),
+    }
+    needs = {"sun": "sun", "uv": "uv", "snowfall": "snowfall", "rh": "rh", "aqi": "aqi", "goodair": "aqi"}
+    meta = {}
+    for vid, (kind, scale, get) in defs.items():
+        if needs.get(vid, "tmax") not in smp:
+            print(f"atlas: skipping {vid}")
+            continue
+        x = get().astype(np.float64)[:, mask]  # (days, ncells)
+        periods = []
+        for m in range(13):
+            sl = slice(0, days) if m == 12 else slice(MONTH_START[m], MONTH_START[m + 1])
+            with np.errstate(invalid="ignore"):
+                v = np.nansum(x[sl], 0) if kind == "sum" else np.nanmean(x[sl], 0)
+            if kind == "mean":
+                v = np.where(np.isnan(x[sl]).all(0), np.nan, v)
+            periods.append(v)
+        q = np.stack(periods) / scale
+        q = np.where(np.isnan(q), -32768, np.clip(np.round(q), -32767, 32767)).astype("<i2")
+        blob = gzip.compress(q.tobytes(), 9, mtime=0)
+        with open(os.path.join(out, f"{vid}.bin"), "wb") as f:
+            f.write(blob)
+        meta[vid] = {"file": f"atlas/{vid}.bin", "kind": kind, "scale": scale, "bytes": len(blob)}
+        print(f"atlas {vid:9s} {len(blob)/1e3:6.0f} kB")
+    return meta
 
 
 if __name__ == "__main__":

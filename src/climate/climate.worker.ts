@@ -414,6 +414,11 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
       add(m, 'sst', mean('sst'), w);
       add(m, 'sun', mean('sun'), w);
       add(m, 'uv', mean('uv'), w);
+      add(m, 'rh', mean('rh'), w);
+      add(m, 'aqi', mean('aqi'), w);
+      add(m, 'goodAirDays', count('aqi', (x) => x <= 50), w);
+      const sf = mean('snowfall');
+      add(m, 'snowfall', sf === undefined ? undefined : sf * (b - a), w);
       const pm = mean('precip');
       add(m, 'precip', pm === undefined ? undefined : pm * (b - a), w);
       add(m, 'rainDays', count('precip', (x) => x >= 1), w);

@@ -1,4 +1,4 @@
-export type ClimVar = 'feels' | 'tmax' | 'tmin' | 'dew' | 'sst' | 'cloud' | 'precip' | 'wind' | 'snow' | 'sun' | 'uv';
+export type ClimVar = 'feels' | 'tmax' | 'tmin' | 'dew' | 'sst' | 'cloud' | 'precip' | 'wind' | 'snow' | 'sun' | 'uv' | 'rh' | 'snowfall' | 'aqi';
 export type CritVar = ClimVar | 'daylight';
 
 export interface VarMeta {
@@ -50,6 +50,10 @@ export interface MonthStats {
   sst: number;
   sun: number; // average hours of sunshine per day
   uv: number; // average daily peak UV index
+  rh: number; // average daytime relative humidity, %
+  snowfall: number; // cm of snow falling in the month
+  aqi: number; // average daily US AQI (PM2.5)
+  goodAirDays: number; // days with AQI <= 50
   match: number; // matching days per month
   /** the conditions that rule out the most days this month, worst first */
   why: Obstacle[];

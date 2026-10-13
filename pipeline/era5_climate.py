@@ -117,6 +117,8 @@ def main():
                     help="compute only daily sunshine hours for the same sample days (samples_sun.npz)")
     ap.add_argument("--only-uv", action="store_true",
                     help="compute only the daily maximum UV index for the same sample days (samples_uv.npz)")
+    ap.add_argument("--only-extra", action="store_true",
+                    help="compute only daytime relative humidity and daily snowfall for the same sample days (samples_extra.npz)")
     args = ap.parse_args()
 
     y0, y1 = (int(x) for x in args.years.split("-"))
@@ -160,6 +162,8 @@ def main():
         return sunshine(args, years, L, cz, coarse, lat_c, lon_c, offs)
     if args.only_uv:
         return uv_index(args, years, L, cz, coarse, lat_c, lon_c, offs)
+    if args.only_extra:
+        return extra(args, years, L, cz, coarse, lat_c, lon_c, offs)
 
     # ---- blocks ----------------------------------------------------------
     nblocks = (365 + L - 1) // L
@@ -437,6 +441,66 @@ def uv_index(args, years, L, cz, coarse, lat_c, lon_c, offs):
             o[(int(d["doy0"]) + k) % 365] = d["uv"][k]
     np.savez(os.path.join(args.work, "samples_uv.npz"), uv=o)
     print("wrote samples_uv.npz")
+
+
+
+def extra(args, years, L, cz, coarse, lat_c, lon_c, offs):
+    """Daytime (9-18 local) mean relative humidity (%) and daily snowfall (cm, at 10:1)."""
+    R, C = cz.rows, cz.cols
+    nblocks = (365 + L - 1) // L
+    part_dir = os.path.join(args.work, "parts_extra")
+    os.makedirs(part_dir, exist_ok=True)
+    hours_all = list(range(-12, 24 * L + 13))
+    hours_3 = [h for h in hours_all if h % 3 == 0]
+    loc_h = np.arange(24)
+    pool = ThreadPoolExecutor(args.threads)
+    t_start = time.time()
+    blocks = range(nblocks) if not args.limit_blocks else range(args.limit_blocks)
+    for b in blocks:
+        part = os.path.join(part_dir, f"b{b:03d}.npz")
+        if os.path.exists(part):
+            continue
+        doy0, ndays, year, start = block_start(b, L, years, args)
+        h0 = hidx(start)
+
+        def work(key):
+            var, h = key
+            return key, coarse(np.nan_to_num(fetch(var, h0 + h), nan=0.0))
+
+        keys = [("2m_temperature", h) for h in hours_all] + [("snowfall", h) for h in hours_all]
+        keys += [("2m_dewpoint_temperature", h) for h in hours_3]
+        got = dict(pool.map(work, keys))
+        T = np.stack([got[("2m_temperature", h)] for h in hours_all]) - 273.15
+        SF = np.maximum(np.stack([got[("snowfall", h)] for h in hours_all]), 0) * 1000.0  # mm water / cm snow
+        a = np.stack([got[("2m_dewpoint_temperature", h)] for h in hours_3]) - 273.15
+        x = np.array(hours_3, dtype=np.float32)
+        Td = np.empty_like(T)
+        for n, h in enumerate(hours_all):
+            i = min(int(np.searchsorted(x, h, side="right")) - 1, len(x) - 2)
+            t = (h - x[i]) / 3.0
+            Td[n] = a[i] * (1 - t) + a[i + 1] * t
+        es = lambda c: 6.112 * np.exp(17.62 * c / (243.12 + c))  # noqa: E731
+        RH = np.clip(100 * es(np.minimum(Td, T)) / es(T), 0, 100)
+        rh = np.zeros((ndays, R, C), np.float32)
+        sf = np.zeros((ndays, R, C), np.float32)
+        for d in range(ndays):
+            idx = 24 * d + loc_h[:, None] - offs[None, :] + 12
+            idx = np.broadcast_to(idx[:, None, :], (24, R, C))
+            rh[d] = np.take_along_axis(RH, idx, 0)[9:18].mean(0)
+            sf[d] = np.take_along_axis(SF, idx + 1, 0).sum(0)
+        np.savez(part, doy0=doy0, year=year, rh=rh, snowfall=sf)
+        print(f"extra block {b+1}/{nblocks} {start:%Y-%m-%d} elapsed={time.time()-t_start:.0f}s", flush=True)
+
+    if args.limit_blocks:
+        return
+    out = {k: np.full((365, R, C), np.nan, np.float32) for k in ("rh", "snowfall")}
+    for b in range(nblocks):
+        d = np.load(os.path.join(part_dir, f"b{b:03d}.npz"))
+        for k in out:
+            for j in range(d[k].shape[0]):
+                out[k][(int(d["doy0"]) + j) % 365] = d[k][j]
+    np.savez(os.path.join(args.work, "samples_extra.npz"), **out)
+    print("wrote samples_extra.npz")
 
 
 if __name__ == "__main__":

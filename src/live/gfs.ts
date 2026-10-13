@@ -15,7 +15,7 @@ export const NO_SEA = -60;
 
 export type LiveVar =
   | 'temp' | 'feels' | 'precip' | 'cloud' | 'wind' | 'snow' | 'humidity' | 'orog' | 'csnow' | 'dew' | 'sst'
-  | 'sunsd' | 'sun' | 'uvb' | 'ozone' | 'uv' | 'uvmax';
+  | 'sunsd' | 'sun' | 'uvb' | 'ozone' | 'uv' | 'uvmax' | 'radar' | 'satellite' | 'aqi' | 'snowfall';
 
 /** GRIB parameter + level as written in the .idx inventory */
 const RECORDS: Record<LiveVar, string[]> = {
@@ -39,6 +39,11 @@ const RECORDS: Record<LiveVar, string[]> = {
   ozone: ['TOZNE:entire atmosphere (considered as a single layer)'],
   uv: [], // derived: UV index at the hour (live.worker.ts)
   uvmax: [], // derived: peak UV index over the day (live.worker.ts)
+  radar: [], // observed imagery, not GFS (observed.ts)
+  satellite: [],
+  aqi: [], // NOAA GEFS-Aerosols, not GFS (aerosol.ts)
+  // snowfall rate: precipitation where it falls as snow
+  snowfall: ['PRATE:surface', 'CSNOW:surface'],
 };
 
 export interface Cycle {
