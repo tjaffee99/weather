@@ -1,15 +1,16 @@
 /**
- * Location cards for the live layers other than temperature. Each is a
- * lighter box about that one thing: the value now, what it will do over the
- * next day in plain words, a 24-hour chart and the next few days. The full
- * forecast card stays one tap away.
+ * Location cards for the live layers. Each is a box about one thing: the value
+ * now, what it will do over the next day in plain words, a 24-hour chart and
+ * the next few days. Temperature is the main card (the full forecast: also
+ * wind, humidity, rain, UV and air at a glance); every other layer's card has
+ * the full forecast one tap away.
  */
 import { h } from '../ui/dom';
-import { AQI, CLOUD, HUMIDITY, PRECIP, SNOWFALL, UV_INDEX, WIND, colorAt } from '../map/palettes';
-import { fmt, units } from '../units';
+import { AQI, CLOUD, HUMIDITY, PRECIP, SNOWFALL, TEMPERATURE, UV_INDEX, WIND, colorAt } from '../map/palettes';
+import { fmt, toDisplay, units } from '../units';
 import { condition, type Hour, type PointForecast } from './pointForecast';
 
-export type CardKind = 'precip' | 'cloud' | 'uv' | 'aqi' | 'snow' | 'wind' | 'humidity';
+export type CardKind = 'temp' | 'precip' | 'cloud' | 'uv' | 'aqi' | 'snow' | 'wind' | 'humidity';
 
 export interface CardContext {
   fc: PointForecast;
@@ -17,6 +18,8 @@ export interface CardContext {
   at: number;
   /** US AQI series for the air card: [time, aqi], filled in as it loads */
   air?: [number, number][];
+  /** temperature card: lead with the feels-like temperature */
+  feels?: boolean;
 }
 
 const HOUR = 3600_000;
@@ -153,8 +156,12 @@ function days(rows: { t: number; icon?: string; main: string; note?: string }[],
   );
 }
 
-const facts = (...items: [string, string][]) =>
-  h('div', { class: 'lc-facts' }, ...items.filter(([, v]) => v).map(([k, v]) => h('div', { class: 'lc-fact' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v))));
+const facts = (...items: [string, string, string?][]) =>
+  h(
+    'div',
+    { class: `lc-facts${items.filter(([, v]) => v).length > 3 ? ' grid' : ''}` },
+    ...items.filter(([, v]) => v).map(([k, v, n]) => h('div', { class: 'lc-fact' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), n ? h('div', { class: 'n' }, n) : null)),
+  );
 
 /** Worst weather code over some hours, for a day icon. */
 function dayIcon(hs: Hour[]): string {
@@ -164,6 +171,169 @@ function dayIcon(hs: Hour[]): string {
 }
 
 // ---------- the cards ----------
+
+/** The next day's temperatures in words: where it goes and when, plus rain or snow if likely. */
+function tempSay(next: Hour[], tz: string | undefined, feels: boolean): string {
+  const v = (x: Hour) => (feels ? x.feels ?? x.temp : x.temp);
+  if (next.length < 2) return '';
+  const hi = next.reduce((a, b) => (v(b) > v(a) ? b : a)), lo = next.reduce((a, b) => (v(b) < v(a) ? b : a));
+  const deg = (x: Hour) => fmt('temp', v(x));
+  let say: string;
+  if (toDisplay('temp', v(hi)) - toDisplay('temp', v(lo)) < 3) say = `Steady around ${deg(next[0])} for the next day.`;
+  else if (hi === next[0]) say = `Cooling to ${deg(lo)} by ${hourName(lo.t, tz)}.`;
+  else if (lo === next[0]) say = `Warming to ${deg(hi)} by ${hourName(hi.t, tz)}.`;
+  else if (hi.t < lo.t) say = `Up to ${deg(hi)} around ${hourName(hi.t, tz)}, then down to ${deg(lo)} by ${hourName(lo.t, tz)}.`;
+  else say = `Down to ${deg(lo)} around ${hourName(lo.t, tz)}, then up to ${deg(hi)} by ${hourName(hi.t, tz)}.`;
+  const wet = next.find((x, i) => i > 0 && ((x.precip ?? 0) >= 0.2 || (x.pop ?? 0) >= 50));
+  if (wet && !((next[0].precip ?? 0) >= 0.2)) say += ` ${[71, 73, 75, 77, 85, 86].includes(wet.code) ? 'Snow' : 'Rain'} likely from about ${hourName(wet.t, tz)}.`;
+  else if ((next[0].precip ?? 0) >= 0.2) say += ` ${condition(next[0].code, next[0].isDay).label} now.`;
+  return say;
+}
+
+/** 24-hour temperature curve, coloured by temperature, with the weather every 3 hours above it. */
+function tempCurve(next: Hour[], tz: string | undefined, feels: boolean): HTMLElement {
+  const W = 340, H = 112, top = 30, bottom = 16;
+  const v = (x: Hour) => toDisplay('temp', feels ? x.feels ?? x.temp : x.temp);
+  const vs = next.map(v);
+  const lo = Math.min(...vs), hi = Math.max(...vs);
+  const pad = Math.max(1, (hi - lo) * 0.18);
+  const n = next.length;
+  const x = (i: number) => (W * (i + 0.5)) / n;
+  const y = (t: number) => top + 10 + (1 - (t - (lo - pad)) / (hi + pad - (lo - pad) || 1)) * (H - top - bottom - 14);
+  const step = n > 12 ? 3 : 1; // hourly data: label every 3 hours
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', '100%');
+  svg.setAttribute('class', 'lc-bars');
+  const gid = `tc${Math.random().toString(36).slice(2, 8)}`;
+  const grad = document.createElementNS(ns, 'linearGradient');
+  grad.id = gid;
+  grad.setAttribute('gradientUnits', 'userSpaceOnUse');
+  grad.setAttribute('x1', '0');
+  grad.setAttribute('x2', String(W));
+  grad.setAttribute('y1', '0');
+  grad.setAttribute('y2', '0');
+  next.forEach((hr, i) => {
+    const st = document.createElementNS(ns, 'stop');
+    st.setAttribute('offset', String(x(i) / W));
+    st.setAttribute('stop-color', colorAt(TEMPERATURE, feels ? hr.feels ?? hr.temp : hr.temp));
+    grad.append(st);
+  });
+  const defs = document.createElementNS(ns, 'defs');
+  defs.append(grad);
+  svg.append(defs);
+  let d = `M${x(0)},${y(vs[0])}`;
+  for (let i = 1; i < n; i++) {
+    const cx = (x(i - 1) + x(i)) / 2;
+    d += ` C${cx},${y(vs[i - 1])} ${cx},${y(vs[i])} ${x(i)},${y(vs[i])}`;
+  }
+  const path = document.createElementNS(ns, 'path');
+  path.setAttribute('d', d);
+  path.setAttribute('fill', 'none');
+  path.setAttribute('stroke', `url(#${gid})`);
+  path.setAttribute('stroke-width', '3');
+  path.setAttribute('stroke-linecap', 'round');
+  svg.append(path);
+  next.forEach((hr, i) => {
+    if (i % step) return;
+    const c = document.createElementNS(ns, 'circle');
+    c.setAttribute('cx', String(x(i)));
+    c.setAttribute('cy', String(y(vs[i])));
+    c.setAttribute('r', i === 0 ? '3.6' : '2.4');
+    c.setAttribute('fill', colorAt(TEMPERATURE, feels ? hr.feels ?? hr.temp : hr.temp));
+    c.setAttribute('stroke', '#fff');
+    c.setAttribute('stroke-width', '1.2');
+    const val = document.createElementNS(ns, 'text');
+    val.setAttribute('x', String(x(i)));
+    val.setAttribute('y', String(y(vs[i]) - 7));
+    val.setAttribute('text-anchor', 'middle');
+    val.setAttribute('class', 'lc-val');
+    val.textContent = `${Math.round(vs[i])}°`;
+    // the weather in this 3-hour window (its most significant hour), with rain chance
+    const win = next.slice(i, i + step);
+    const worst = win.reduce((a, b) => (b.code > a.code ? b : a));
+    const pop = Math.max(...win.map((w) => w.pop ?? 0));
+    const icon = document.createElementNS(ns, 'text');
+    icon.setAttribute('x', String(x(i)));
+    icon.setAttribute('y', '13');
+    icon.setAttribute('text-anchor', 'middle');
+    icon.setAttribute('class', 'lc-icon');
+    icon.textContent = condition(worst.code, worst.isDay).icon;
+    const title = document.createElementNS(ns, 'title');
+    title.textContent = `${hourName(hr.t, tz)}: ${condition(worst.code, worst.isDay).label}`;
+    icon.append(title);
+    svg.append(c, val, icon);
+    if (pop >= 20) {
+      const p = document.createElementNS(ns, 'text');
+      p.setAttribute('x', String(x(i)));
+      p.setAttribute('y', '25');
+      p.setAttribute('text-anchor', 'middle');
+      p.setAttribute('class', 'lc-pop');
+      p.textContent = `${Math.round(pop / 10) * 10}%`;
+      svg.append(p);
+    }
+    const ax = document.createElementNS(ns, 'text');
+    ax.setAttribute('x', String(x(i)));
+    ax.setAttribute('y', String(H - 3));
+    ax.setAttribute('text-anchor', 'middle');
+    ax.setAttribute('class', 'lc-axis');
+    ax.textContent = i === 0 ? 'Now' : hourName(hr.t, tz).replace(/\s?([AP])M/, (_, q) => q.toLowerCase());
+    svg.append(ax);
+  });
+  return h('div', { class: 'lc-chart' }, svg);
+}
+
+const windShort = (kmh: number) => (kmh < 2 ? 'calm' : kmh < 12 ? 'light' : kmh < 29 ? 'breezy' : kmh < 39 ? 'windy' : kmh < 62 ? 'very windy' : 'stormy');
+
+function tempCard({ fc, at, feels }: CardContext): Node[] {
+  const tz = fc.timezone;
+  const { cur, next } = window24(fc, at);
+  const lead = feels ? cur.feels ?? cur.temp : cur.temp;
+  const cond = condition(cur.code, cur.isDay);
+  const day = [...fc.daily].reverse().find((d) => d.t <= cur.t + 2 * HOUR) ?? fc.daily[0];
+  const sub = [
+    feels ? `actual ${fmt('temp', cur.temp)}` : num(cur.feels) ? `feels ${fmt('temp', cur.feels)}` : '',
+    day ? `H ${fmt('temp', day.max)} · L ${fmt('temp', day.min)}` : '',
+  ].filter(Boolean).join(' · ');
+  const head = headline(fmt('temp', lead), cond.label, sub, colorAt(TEMPERATURE, lead));
+  head.querySelector('.lc-word')?.prepend(h('span', { class: 'lc-cond', 'aria-hidden': 'true' }, cond.icon));
+  head.querySelector('.lc-chip')?.remove();
+  const popMax = max(next.map((x) => x.pop ?? 0));
+  const rain24 = sum(next.map((x) => x.precip ?? 0));
+  const dew = cur.dew;
+  const followDays = fc.daily.filter((d) => d.t > cur.t + 2 * HOUR).slice(0, 4);
+  const hoursOf = (d: { t: number }) => fc.hours.filter((x) => x.t >= d.t - 7 * HOUR && x.t < d.t + 17 * HOUR);
+  return [
+    head,
+    sentence(tempSay(next, tz, !!feels)),
+    tempCurve(next, tz, !!feels),
+    facts(
+      ['Wind', num(cur.wind) ? fmt('speed', cur.wind) : '—', num(cur.gust) ? `gusts ${fmt('speed', cur.gust, false)}` : num(cur.wind) ? windShort(cur.wind) : undefined],
+      ['Humidity', num(cur.humidity) ? fmt('percent', cur.humidity) : '—', num(dew) ? `dew point ${fmt('temp', dew)}` : undefined],
+      ['Rain', `${Math.round(popMax || 0)}%`, rain24 >= 0.1 ? `total ${fmt('precip', rain24)}` : 'next 24 h'],
+      ...(num(day?.uv) ? [['UV today', String(Math.round(day!.uv!)), uvLevel(day!.uv!).toLowerCase()] as [string, string, string]] : []),
+      ...(num(day?.sun) ? [['Sunshine', `${day!.sun!.toFixed(1)} h`, 'today'] as [string, string, string]] : []),
+      ...(fc.air ? [['Air quality', String(Math.round(fc.air.aqi)), aqiWord(fc.air.aqi).toLowerCase()] as [string, string, string]] : []),
+    ),
+    followDays.length
+      ? days(
+          followDays.map((d) => {
+            const hs = hoursOf(d);
+            return { t: d.t + 5 * HOUR, icon: hs.length ? dayIcon(hs) : undefined, main: `${fmt('temp', d.max)}`, note: `low ${fmt('temp', d.min)}` };
+          }),
+          tz,
+        )
+      : null,
+    h(
+      'div',
+      { class: 'note' },
+      fc.source === 'Open-Meteo'
+        ? `Point forecast: Open-Meteo (best model for this spot)${tz ? ` · times in ${tz.replace(/_/g, ' ')}` : ''}. Map: NOAA GFS.`
+        : 'Point forecast: NOAA GFS, adjusted to local terrain elevation.',
+    ),
+  ].filter(Boolean) as Node[];
+}
 
 function precipCard({ fc, at }: CardContext): Node[] {
   const { cur, next } = window24(fc, at);
@@ -349,6 +519,8 @@ function humidityCard({ fc, at }: CardContext): Node[] {
 
 export function layerCard(kind: CardKind, ctx: CardContext): Node[] {
   switch (kind) {
+    case 'temp':
+      return tempCard(ctx);
     case 'precip':
       return precipCard(ctx);
     case 'cloud':
@@ -367,6 +539,7 @@ export function layerCard(kind: CardKind, ctx: CardContext): Node[] {
 }
 
 export const CARD_TITLES: Record<CardKind, string> = {
+  temp: 'Temperature',
   precip: 'Precipitation',
   cloud: 'Clouds',
   uv: 'UV index',

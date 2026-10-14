@@ -923,6 +923,35 @@ button {
   font-weight: 650;
   font-size: 13px;
 }
+.lc-facts.grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+}
+.lc-fact .n {
+  font-size: 10.5px;
+  color: var(--faint);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lc-cond {
+  font-size: 17px;
+  line-height: 1;
+}
+.lc-bars .lc-icon {
+  font-size: 13px;
+}
+.lc-bars .lc-pop {
+  font-size: 8.5px;
+  fill: #2f78c4;
+  font-weight: 600;
+}
+.lc-switch.back {
+  display: block;
+  padding: 0 0 2px;
+  margin-top: 6px;
+}
 .lc-switch {
   border: 0;
   background: none;

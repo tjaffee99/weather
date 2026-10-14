@@ -86,6 +86,7 @@ let dem: Dem;
 
 function closeCard() {
   els.card.classList.add('hidden');
+  els.card.classList.remove('compact');
   clear(els.card);
   marker?.remove();
   marker = null;

@@ -4,14 +4,14 @@ import { h, clear } from '../ui/dom';
 import { renderLegend } from '../ui/legend';
 import { cssGradient } from '../map/palettes';
 import { coordLabel, timeLabel } from '../ui/format';
-import { colorAt, GLACIER, TEMPERATURE } from '../map/palettes';
-import { condition, openMeteo, type Hour, type PointForecast } from './pointForecast';
+import { GLACIER } from '../map/palettes';
+import { openMeteo, type PointForecast } from './pointForecast';
 import { pm25FromAqi } from './aerosol';
 import { CARD_TITLES, layerCard, type CardKind } from './layerCard';
 import { pointElevation } from '../map/localDem';
 import { demAt, type Dem } from '../data';
 import type { Place } from '../geocode';
-import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
+import { fmt, fromDisplay, unitLabel, units } from '../units';
 import type { LiveVar } from './gfs';
 
 const HOUR = 3600_000;
@@ -380,7 +380,7 @@ export class LiveUI {
     if (layerChanged) st.full = false;
     const kind = this.cardKind();
     const compact = kind !== null && !st.full;
-    this.els.card.classList.toggle('compact', compact);
+    this.els.card.classList.add('compact');
     if (st.error) {
       st.body.replaceChildren(h('div', { class: 'desc' }, st.error));
       return;
@@ -391,8 +391,14 @@ export class LiveUI {
     }
     if (kind === 'aqi' && !st.air && !st.airLoading) this.loadAirSeries();
     if (!compact) {
-      const back = kind ? h('button', { class: 'lc-switch', onclick: () => ((st.full = false), this.refreshCard()) }, `‹ ${CARD_TITLES[kind]}`) : null;
-      st.body.replaceChildren(...(back ? [back] : []), ...renderForecast(st.fc, st.at));
+      // the main card: temperature and the full forecast
+      const feels = this.c.layer.id === 'feels';
+      const back = kind ? h('button', { class: 'lc-switch back', onclick: () => ((st.full = false), this.refreshCard()) }, `‹ ${CARD_TITLES[kind]}`) : null;
+      st.body.replaceChildren(
+        ...(back ? [back] : []),
+        h('div', { class: 'lc-title' }, feels ? 'Feels like' : CARD_TITLES.temp),
+        ...layerCard('temp', { fc: st.fc, at: st.at, feels }),
+      );
       return;
     }
     st.body.replaceChildren(
@@ -423,189 +429,4 @@ export class LiveUI {
     st.air = series;
     if (this.cardKind() === 'aqi') this.refreshCard();
   }
-}
-
-const HOUR_MS = 3600_000;
-
-function renderForecast(fc: PointForecast, at: number): Node[] {
-  const tz = fc.timezone;
-  // first hour at/after the time shown on the map
-  let i0 = fc.hours.findIndex((x) => x.t > at - HOUR_MS / 2);
-  if (i0 < 0) i0 = 0;
-  const cur = fc.hours[i0];
-  const live = Math.abs(at - Date.now()) < 45 * 60_000;
-  const cond = cur.code >= 0 ? condition(cur.code, cur.isDay) : null;
-  const day = [...fc.daily].reverse().find((d) => d.t <= cur.t);
-  const hl = day ? `H ${fmt('temp', day.max)}  L ${fmt('temp', day.min)}` : '';
-  const stat = (k: string, v: string, note?: string) =>
-    h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), note ? h('div', { class: 'n' }, note) : null);
-  const hrs = threeHourly(fc, i0);
-  const hourLabel = (t: number, i: number) => {
-    if (i === 0) return live ? 'Now' : fmtLocal(t, tz, { hour: 'numeric' });
-    const d = new Date(t);
-    const hh = Number(fmtLocal(t, tz, { hour: 'numeric', hourCycle: 'h23' }));
-    return hh === 0 ? fmtLocal(d.getTime(), tz, { weekday: 'short' }) : fmtLocal(t, tz, { hour: 'numeric' });
-  };
-  const precipTxt = cur.pop !== undefined ? `${Math.round(cur.pop)}% · ${fmt('precip', cur.precip ?? 0)}` : fmt('rate', cur.precip ?? 0);
-  return [
-    h(
-      'div',
-      { class: 'now' },
-      h('span', { class: 'now-icon', 'aria-hidden': 'true' }, cond?.icon ?? ''),
-      h('span', { class: 'big' }, fmt('temp', cur.temp)),
-      h(
-        'div',
-        { class: 'now-text' },
-        h('div', { class: 'now-cond' }, cond?.label ?? ''),
-        h('div', { class: 'now-sub' }, [cur.feels !== undefined ? `Feels ${fmt('temp', cur.feels)}` : '', hl].filter(Boolean).join(' · ')),
-        h('div', { class: 'now-sub' }, live ? 'Now' : timeLabel(cur.t)),
-      ),
-    ),
-    h('h3', {}, 'Next 24 hours'),
-    hourlyStrip(hrs, hourLabel),
-    h(
-      'div',
-      { class: 'stats' },
-      stat('Wind', cur.wind !== undefined ? `${fmt('speed', cur.wind)}${cur.gust ? ` · gusts ${fmt('speed', cur.gust, false)}` : ''}` : '—', cur.wind !== undefined ? windWord(cur.wind) : undefined),
-      stat('Humidity', cur.humidity !== undefined ? fmt('percent', cur.humidity) : '—', cur.humidity !== undefined ? humidWord(cur.temp, cur.humidity) : undefined),
-      stat('Cloud cover', cur.cloud !== undefined ? fmt('percent', cur.cloud) : '—', cur.cloud !== undefined ? cloudWord(cur.cloud) : undefined),
-      stat('Precipitation', precipTxt),
-      ...(day?.sun !== undefined ? [stat('Sunshine today', `${day.sun.toFixed(1)} h`)] : []),
-      ...(day?.uv !== undefined ? [stat('UV index today', `${Math.round(day.uv)}`, uvAdvice(day.uv))] : []),
-      ...(fc.air ? [stat('Air quality', `${Math.round(fc.air.aqi)} AQI`, `${aqiAdvice(fc.air.aqi)} · PM2.5 ${Math.round(fc.air.pm25)}`)] : []),
-    ),
-    h(
-      'div',
-      { class: 'note' },
-      fc.source === 'Open-Meteo'
-        ? `Point forecast: Open-Meteo (best model for this spot)${tz ? ` · times in ${tz.replace(/_/g, ' ')}` : ''}. Map: NOAA GFS.`
-        : 'Point forecast: NOAA GFS, adjusted to local terrain elevation.',
-    ),
-  ];
-}
-
-/**
- * Eight widgets, one per 3 hours. Each shows the temperature at the start of
- * its window and the most significant weather (and highest rain chance) in it.
- */
-function threeHourly(fc: PointForecast, i0: number): Hour[] {
-  const src = fc.hours;
-  // GFS fallback is already 3-hourly
-  const step = src.length > 1 && src[1].t - src[0].t >= 3 * HOUR_MS ? 1 : 3;
-  const out: Hour[] = [];
-  for (let k = 0; k < 8; k++) {
-    const i = i0 + k * step;
-    if (i >= src.length) break;
-    const win = src.slice(i, Math.min(src.length, i + step));
-    const worst = win.reduce((a, b) => (b.code > a.code ? b : a), win[0]);
-    const pops = win.map((x) => x.pop).filter((x): x is number => x !== undefined);
-    out.push({ ...src[i], code: worst.code, isDay: src[i].isDay, pop: pops.length ? Math.max(...pops) : undefined });
-  }
-  return out;
-}
-
-function fmtLocal(t: number, tz: string | undefined, o: Intl.DateTimeFormatOptions) {
-  try {
-    return new Date(t).toLocaleString(undefined, { ...o, timeZone: tz });
-  } catch {
-    return new Date(t).toLocaleString(undefined, o);
-  }
-}
-
-/** Row of forecast widgets with a temperature curve coloured by temperature. */
-function hourlyStrip(hrs: Hour[], label: (t: number, i: number) => string): HTMLElement {
-  const COL = 44;
-  const W = COL * hrs.length;
-  const H = 62;
-  const vs = hrs.map((x) => toDisplay('temp', x.temp));
-  const lo = Math.min(...vs), hi = Math.max(...vs);
-  const pad = Math.max(1, (hi - lo) * 0.15);
-  const x = (i: number) => COL * i + COL / 2;
-  const y = (v: number) => 18 + (1 - (v - (lo - pad)) / (hi + pad - (lo - pad) || 1)) * (H - 26);
-  const ns = 'http://www.w3.org/2000/svg';
-  const svg = document.createElementNS(ns, 'svg');
-  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('width', '100%');
-  svg.setAttribute('class', 'curve');
-  const gid = `tg${Math.random().toString(36).slice(2, 8)}`;
-  const grad = document.createElementNS(ns, 'linearGradient');
-  grad.id = gid;
-  grad.setAttribute('gradientUnits', 'userSpaceOnUse');
-  grad.setAttribute('x1', '0');
-  grad.setAttribute('x2', String(W));
-  grad.setAttribute('y1', '0');
-  grad.setAttribute('y2', '0');
-  hrs.forEach((hr, i) => {
-    const st = document.createElementNS(ns, 'stop');
-    st.setAttribute('offset', String(x(i) / W));
-    st.setAttribute('stop-color', colorAt(TEMPERATURE, hr.temp));
-    grad.append(st);
-  });
-  const defs = document.createElementNS(ns, 'defs');
-  defs.append(grad);
-  svg.append(defs);
-  // smooth path through the points
-  let d = `M${x(0)},${y(vs[0])}`;
-  for (let i = 1; i < vs.length; i++) {
-    const cx = (x(i - 1) + x(i)) / 2;
-    d += ` C${cx},${y(vs[i - 1])} ${cx},${y(vs[i])} ${x(i)},${y(vs[i])}`;
-  }
-  const path = document.createElementNS(ns, 'path');
-  path.setAttribute('d', d);
-  path.setAttribute('fill', 'none');
-  path.setAttribute('stroke', `url(#${gid})`);
-  path.setAttribute('stroke-width', '3.5');
-  path.setAttribute('stroke-linecap', 'round');
-  svg.append(path);
-  vs.forEach((v, i) => {
-    const c = document.createElementNS(ns, 'circle');
-    c.setAttribute('cx', String(x(i)));
-    c.setAttribute('cy', String(y(v)));
-    c.setAttribute('r', '2.6');
-    c.setAttribute('fill', colorAt(TEMPERATURE, hrs[i].temp));
-    c.setAttribute('stroke', '#fff');
-    c.setAttribute('stroke-width', '1.2');
-    const t = document.createElementNS(ns, 'text');
-    t.setAttribute('x', String(x(i)));
-    t.setAttribute('y', String(y(v) - 7));
-    t.setAttribute('text-anchor', 'middle');
-    t.setAttribute('class', 'curve-label');
-    t.textContent = `${Math.round(v)}°`;
-    svg.append(c, t);
-  });
-  const cols = h('div', { class: 'hours' });
-  hrs.forEach((hr, i) => {
-    const cond = hr.code >= 0 ? condition(hr.code, hr.isDay) : null;
-    cols.append(
-      h(
-        'div',
-        { class: 'hour', title: cond?.label ?? '' },
-        h('div', { class: 'hour-t' }, label(hr.t, i)),
-        h('div', { class: 'hour-i' }, cond?.icon ?? ''),
-        h('div', { class: 'hour-p' }, hr.pop !== undefined && hr.pop >= 15 ? `${Math.round(hr.pop / 5) * 5}%` : ''),
-      ),
-    );
-  });
-  return h('div', { class: 'hourly' }, cols, svg);
-}
-
-/** Plain words for the stat boxes. */
-function windWord(kmh: number): string {
-  return kmh < 2 ? 'calm' : kmh < 12 ? 'light air' : kmh < 29 ? 'breezy' : kmh < 39 ? 'windy' : kmh < 62 ? 'very windy' : 'stormy';
-}
-function cloudWord(pct: number): string {
-  return pct < 10 ? 'clear' : pct < 35 ? 'mostly clear' : pct < 70 ? 'partly cloudy' : pct < 90 ? 'mostly cloudy' : 'overcast';
-}
-/** How the air feels, from the dew point (relative humidity alone depends on temperature). */
-function humidWord(tempC: number, rh: number): string {
-  const a = 17.62, b = 243.12;
-  const g = Math.log(Math.max(1, rh) / 100) + (a * tempC) / (b + tempC);
-  const dew = (b * g) / (a - g);
-  return dew < 10 ? 'dry' : dew < 16 ? 'comfortable' : dew < 20 ? 'humid' : dew < 24 ? 'muggy' : 'oppressive';
-}
-function aqiAdvice(a: number): string {
-  return a <= 50 ? 'good' : a <= 100 ? 'moderate' : a <= 150 ? 'unhealthy for sensitive groups' : a <= 200 ? 'unhealthy' : a <= 300 ? 'very unhealthy' : 'hazardous';
-}
-function uvAdvice(uv: number): string {
-  return uv < 3 ? 'low' : uv < 6 ? 'moderate · sunscreen' : uv < 8 ? 'high · cover up midday' : uv < 11 ? 'very high · avoid midday sun' : 'extreme · stay in shade';
 }
