@@ -15,7 +15,7 @@ An interactive world weather map with three views:
   - UV index (standard UV colours, following the sun);
   - air quality (US AQI from PM2.5, 5-day forecast);
   - snow depth, wind with animated streaks, and humidity.
-  It has an hourly forecast scrubber with cross-fading and city temperature labels. When you zoom in, temperatures are downscaled to the terrain, so individual valleys and ridges show up. Snow depth uses the 3 km HRRR model over the US and Alaska, is shaped by terrain elsewhere, and shows glaciers worldwide. Tap the map for a point forecast: current conditions (including air quality) plus the next 24 hours in 3-hour steps.
+  It has an hourly forecast scrubber with cross-fading and city temperature labels. When you zoom in, temperatures are downscaled to the terrain, so individual valleys and ridges show up. Snow depth uses the 3 km HRRR model over the US and Alaska, is shaped by terrain elsewhere, and shows glaciers worldwide. Tap the map for a point forecast. The temperature layers open the full card: current conditions plus the next 24 hours in 3-hour steps. Each other layer opens a lighter card about that one thing: UV (today's curve, when you need protection, the next days' peaks), precipitation (when rain starts or stops, hourly amounts and chances), clouds and sunshine, air quality (the next 48 hours), wind (speed, direction, gusts), humidity and dew point, or snow. The full forecast is one tap away.
 
 ## How it works
 
@@ -37,6 +37,16 @@ Observed layers are raster tiles recoloured in the browser (`src/live/observed.t
 Global models get the weather of pollution right: dust storms, smoke plumes and stagnant winter air. Their emission inventories, however, lag reality. GEFS-Aerosols (and CAMS) read about twice too high in China, which has cut emissions sharply over the past decade, and too low in South Asia and Cairo. Every PM2.5 value is therefore scaled by a monthly factor for its 1° cell. The factor matches the model to Washington University's [ACAG V6.GL.03](https://sites.wustl.edu/acag/surface-pm2-5/) monthly PM2.5 for 2021–2024, which fuses satellite aerosol data with ground monitors, including China's national network (`pipeline/acag_bias.py` writes `data/aq_bias.bin`). The model's day-to-day variation is kept. After the correction, 1° cell averages land close to city monitor averages: Shanghai 28 µg/m³, Chengdu 35, Delhi 76 and London 9. ACAG reads somewhat above official figures in a few East Asian cities (Beijing 42 against an official ~32). The location card's air quality comes from the same corrected forecast.
 
 Snow depth over the contiguous US and Alaska comes from NOAA's 3 km [HRRR](https://rapidrefresh.noaa.gov/hrrr/) model, fetched the same way (`src/live/hrrr.ts`). Its grids are Lambert conformal and polar stereographic, so the shader projects each pixel onto the native grid instead of resampling, and fades it into GFS at the domain edges. Elsewhere, GFS snow is shaped by terrain within each model cell: about e times deeper for every 700 m above the cell's mean elevation, capped at 4× and floored at 0.1×. Glaciers come from the basemap's vector tiles (Natural Earth at low zoom, OpenStreetMap outlines when zoomed in), because 0.25° models miss most of them.
+
+### Microclimates
+
+A 1° cell averages over places with very different climates: San Francisco's fog belt and the hot East Bay valleys 20 miles inland, Santa Monica and the San Fernando Valley, Lima's cold coast, lake shores and cold-air basins. Elevation alone doesn't explain these. `pipeline/microclimate.py` takes WorldClim 2.1, a station-based monthly climatology for 1970–2000 at 2.5′ (~4.6 km). For every land pixel it blends WorldClim's own 1° cell means exactly the way the app blends ERA5 (B-spline, elevation reach, lapse rate), and keeps the difference. That difference is the local offset that the cells and elevation can't explain. Only this fine-scale pattern is used, never WorldClim's absolute values or its older period. Offsets for daily highs and lows are stored as yearly curves (mean plus 2 harmonics, int8 in 0.1 °C steps) in 10°×10° tiles (`public/data/micro/`, 24 MB in total). The map loads the tiles for the area on screen when zoomed in (zoom 4 and closer, `src/climate/micro.ts`). Per-city values in `cities.json` feed the labels.
+
+- **Atlas:** the shader adds the offset for the period shown. The temperature layers use the high and low offsets (average temperature uses both). In San Francisco, the July high drops from 80 °F to 70 °F and in Oakland from 82 °F to 74 °F, while Livermore stays at 86 °F.
+- **Finder:** an offset acts like a change in elevation. A spot 4 °C cooler matches like one about 600 m higher, which lets it reuse the per-elevation results. Because the San Francisco offset is −6 °C in summer and about 0 in winter, yearly counts are kept per season (Dec–Feb, Mar–May, Jun–Aug, Sep–Nov), and each season is matched at its own offset. Conditions on the highs (feels-like, daytime high) use the high offset; conditions on the lows use the low offset.
+- **Cards** use the offsets at the tapped point; labels use each city's own.
+
+Towns: on top of Natural Earth's cities, `build_cities.py` adds every GeoNames place with 40,000 people or more (about 9,000, such as Walnut Creek, Livermore and Palo Alto). They show as you zoom in, so you can see the climate change from town to town. Labels are computed only for the cities on screen.
 
 ### Climate data
 
@@ -89,6 +99,7 @@ python3 -m venv .venv && .venv/bin/pip install -r pipeline/requirements.txt
 .venv/bin/python pipeline/era5_climate.py --work work/ --only-hires   # 0.25° rain/snow normals (~10 min)
 .venv/bin/python pipeline/gefs_aq.py --work work/           # air quality (needs eccodes)
 .venv/bin/python pipeline/acag_bias.py --work work/         # match air quality to ACAG (needs h5py; ~250 MB)
+.venv/bin/python pipeline/microclimate.py --wc wc/ --work work/   # microclimate tiles + city offsets (WorldClim 2.5' tmax/tmin/elev zips in wc/, ~900 MB; after build_cities.py)
 .venv/bin/python pipeline/encode_climate.py --work work/    # public/data/climate/*
 ```
 
@@ -107,4 +118,5 @@ Live at **https://weather.theojaffee.net** (`public/CNAME`; DNS: `weather` CNAME
 - Point forecasts in the location card: Open-Meteo (CC BY 4.0); place names and boundaries: OpenStreetMap Nominatim
 - Basemap: OpenFreeMap / OpenMapTiles / © OpenStreetMap contributors; low-zoom coastlines: Natural Earth
 - Terrain: AWS Terrain Tiles (Mapzen terrarium)
-- Cities: Natural Earth (public domain)
+- Cities: Natural Earth (public domain); towns and city elevations: GeoNames (CC BY 4.0)
+- Microclimates: WorldClim 2.1 (Fick & Hijmans 2017, CC BY 4.0)

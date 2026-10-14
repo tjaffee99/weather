@@ -16,13 +16,18 @@ export interface Hour {
   humidity?: number;
   wind?: number; // km/h
   gust?: number;
+  windDir?: number; // degrees, direction the wind comes from
+  uv?: number;
+  dew?: number; // °C
+  snowfall?: number; // cm in the hour
+  snowDepth?: number; // cm on the ground
 }
 
 export interface PointForecast {
   source: 'Open-Meteo' | 'NOAA GFS';
   timezone?: string;
   hours: Hour[];
-  daily: { t: number; max: number; min: number; sun?: number; uv?: number }[];
+  daily: { t: number; max: number; min: number; sun?: number; uv?: number; precip?: number; pop?: number; snowfall?: number }[];
   /** current air quality, when available */
   air?: { aqi: number; pm25: number };
 }
@@ -31,10 +36,12 @@ export async function openMeteo(lat: number, lon: number, signal?: AbortSignal):
   const hourly = [
     'temperature_2m', 'apparent_temperature', 'relative_humidity_2m', 'weather_code', 'precipitation_probability',
     'precipitation', 'cloud_cover', 'wind_speed_10m', 'wind_gusts_10m', 'is_day',
+    'wind_direction_10m', 'uv_index', 'dew_point_2m', 'snowfall', 'snow_depth',
   ];
+  const daily = ['temperature_2m_max', 'temperature_2m_min', 'sunshine_duration', 'uv_index_max', 'precipitation_sum', 'precipitation_probability_max', 'snowfall_sum'];
   const url =
     `https://api.open-meteo.com/v1/forecast?latitude=${lat.toFixed(4)}&longitude=${lon.toFixed(4)}` +
-    `&hourly=${hourly.join(',')}&daily=temperature_2m_max,temperature_2m_min,sunshine_duration,uv_index_max` +
+    `&hourly=${hourly.join(',')}&daily=${daily.join(',')}` +
     `&past_days=1&forecast_days=5&timezone=auto&timeformat=unixtime`;
   const res = await fetch(url, { signal });
   const j = await res.json();
@@ -52,17 +59,25 @@ export async function openMeteo(lat: number, lon: number, signal?: AbortSignal):
     humidity: h.relative_humidity_2m?.[i],
     wind: h.wind_speed_10m?.[i],
     gust: h.wind_gusts_10m?.[i],
+    windDir: h.wind_direction_10m?.[i] ?? undefined,
+    uv: h.uv_index?.[i] ?? undefined,
+    dew: h.dew_point_2m?.[i] ?? undefined,
+    snowfall: h.snowfall?.[i] ?? undefined, // cm
+    snowDepth: h.snow_depth?.[i] != null ? h.snow_depth[i] * 100 : undefined, // m -> cm
   })).filter((x) => Number.isFinite(x.temp));
   const d = j.daily;
-  const daily =
+  const days =
     (d?.time as number[] | undefined)?.map((t, i) => ({
       t: t * 1000,
       max: d.temperature_2m_max[i],
       min: d.temperature_2m_min[i],
       sun: d.sunshine_duration?.[i] != null ? d.sunshine_duration[i] / 3600 : undefined,
       uv: d.uv_index_max?.[i] ?? undefined,
+      precip: d.precipitation_sum?.[i] ?? undefined,
+      pop: d.precipitation_probability_max?.[i] ?? undefined,
+      snowfall: d.snowfall_sum?.[i] ?? undefined,
     })) ?? [];
-  return { source: 'Open-Meteo', timezone: j.timezone, hours, daily };
+  return { source: 'Open-Meteo', timezone: j.timezone, hours, daily: days };
 }
 
 export interface Condition {

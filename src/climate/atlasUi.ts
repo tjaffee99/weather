@@ -19,9 +19,11 @@ import { renderLegend } from '../ui/legend';
 import { MONTHS, coordLabel, doyLabel } from '../ui/format';
 import { fmt, fromDisplay, units } from '../units';
 import { blendTaps, levelOf } from './blend';
+import { labelFilter } from '../map/labels';
 import { hideTip, monthTable } from './card';
 import type { ClimateUI } from './climateUi';
 import { DAYS_IN_MONTH, MONTH_START, decodeAtlas, evalAt, evalField, periodDays, periodWeights, type AtlasField, type Period, type PeriodKind } from './atlasData';
+import { MICRO_NC, cityCoefs, microOffset, type MicroCoefs, type MicroVar, type Microclimate } from './micro';
 import { DZ0, DZ_STEP, LAPSE, LEVELS, type DetailResult, type MonthStats } from './types';
 
 const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -35,6 +37,8 @@ interface AtlasVar {
   hint: string;
   /** shifted with elevation like the finder's temperatures */
   temp?: boolean;
+  /** microclimate offset that applies: daytime highs, night lows, or both */
+  micro?: MicroVar;
   /** added up over the period (hours, mm, days); otherwise averaged */
   sum?: boolean;
   /** days on which something happens: a single day shows its chance */
@@ -85,8 +89,8 @@ const amount = (v: number, k: PeriodKind, metricUnit: string, imperialUnit: stri
   return `${digits ? x.toFixed(digits) : Math.round(x).toLocaleString()}${unit ? ` ${units.imperial ? imperialUnit : metricUnit}` : ''}`;
 };
 const per = (k: PeriodKind, u: string) => (k === 'day' ? `${u} a day` : k === 'year' ? `${u} a year` : u);
-const tempVar = (id: string, label: string, hint: string): AtlasVar => ({
-  id, label, group: 'Temperature', hint, temp: true, clip: [-Infinity, Infinity],
+const tempVar = (id: string, label: string, hint: string, micro: MicroVar): AtlasVar => ({
+  id, label, group: 'Temperature', hint, temp: true, micro, clip: [-Infinity, Infinity],
   palette: TEMPERATURE,
   ticks: { month: [-20, 0, 10, 20, 30] },
   ticksImperial: { month: [0, 32, 50, 70, 90] },
@@ -96,10 +100,10 @@ const tempVar = (id: string, label: string, hint: string): AtlasVar => ({
 });
 
 export const ATLAS_VARS: AtlasVar[] = [
-  tempVar('tmean', 'Average temperature', 'Midway between the day’s high and low'),
-  tempVar('tmax', 'Daytime high', 'Average afternoon high'),
-  tempVar('tmin', 'Overnight low', 'Average coldest part of the night'),
-  tempVar('feels', 'Feels-like high', 'Afternoon feels-like, with humidity and wind'),
+  tempVar('tmean', 'Average temperature', 'Midway between the day’s high and low', 3),
+  tempVar('tmax', 'Daytime high', 'Average afternoon high', 1),
+  tempVar('tmin', 'Overnight low', 'Average coldest part of the night', 2),
+  tempVar('feels', 'Feels-like high', 'Afternoon feels-like, with humidity and wind', 1),
   {
     id: 'sun', label: 'Sunshine', group: 'Sun & sky', hint: 'Hours of direct sun', sum: true, clip: [0, 24],
     palette: SUN_M, ticks: { day: [0, 4, 8, 12], month: [0, 100, 200, 300, 400], year: [0, 1000, 2000, 3000, 4000] },
@@ -178,6 +182,7 @@ export const ATLAS_VARS: AtlasVar[] = [
   },
 ];
 
+const LABEL_MS = 120;
 const SHIFTS = Array.from({ length: LEVELS }, (_, k) => -LAPSE * (DZ0 + k * DZ_STEP));
 const hex = (c: string) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16) / 255) as [number, number, number];
 const monthOfDay = (d: number) => MONTH_START.findIndex((s, i) => d >= s && d < MONTH_START[i + 1]);
@@ -208,6 +213,7 @@ export class AtlasUI {
   private label?: HTMLElement;
   private seg?: HTMLElement;
   private labelTimer = 0;
+  micro?: Microclimate;
 
   constructor(
     private map: MlMap,
@@ -396,12 +402,26 @@ export class AtlasUI {
       this.field.setPalette(this.palette());
       this.renderLegend();
     }
+    // microclimates (zoomed in): the shader adds the offset for the shown period
+    this.field.microVar = def.micro ?? 0;
+    this.field.microW.set(periodWeights(this.period, MICRO_NC));
     this.field.setClimateResult(out);
-    // labels are the slow part while scrubbing
-    clearTimeout(this.labelTimer);
-    if (quick || this.playTimer) this.labelTimer = window.setTimeout(() => this.updateCities(), 80);
-    else this.updateCities();
+    // labels are the slow part: while scrubbing or playing, refresh them at most every LABEL_MS
+    if (quick || this.playTimer) {
+      if (!this.labelTimer) {
+        const wait = Math.max(0, LABEL_MS - (performance.now() - this.labelAt));
+        this.labelTimer = window.setTimeout(() => {
+          this.labelTimer = 0;
+          this.updateCities();
+        }, wait);
+      }
+    } else {
+      clearTimeout(this.labelTimer);
+      this.labelTimer = 0;
+      this.updateCities();
+    }
   }
+  private labelAt = 0;
 
   private palette(): Palette {
     const d = this.def, k = this.period.kind;
@@ -410,7 +430,7 @@ export class AtlasUI {
   }
 
   /** A variable's period value at a point, blended like the map (NaN where there is none). */
-  private sample(def: AtlasVar, f: AtlasField, w: Float64Array, lon: number, lat: number, elev: number, days: number): number {
+  private sample(def: AtlasVar, f: AtlasField, w: Float64Array, lon: number, lat: number, elev: number, days: number, off = 0): number {
     const g = this.climate.meta!.grid;
     if (f.flags) {
       const { taps, cover } = blendTaps(g, (p) => (f.flags![p] ? 0 : undefined), lon, lat, 0);
@@ -440,7 +460,12 @@ export class AtlasUI {
       s += t.q * v;
       ws += t.q;
     }
-    return ws > 0 ? (s / ws) * days : NaN;
+    return ws > 0 ? (s / ws) * days + off : NaN;
+  }
+
+  /** A microclimate offset (°C) for a variable and period. */
+  private microFor(def: AtlasVar, mc: MicroCoefs | null | undefined, p: Period): number {
+    return def.micro && mc ? microOffset(mc, def.micro, periodWeights(p, MICRO_NC)) : 0;
   }
 
   /** Is there sea right by this point (within ~30 km, for sea-temperature labels and cards)? */
@@ -631,14 +656,18 @@ export class AtlasUI {
     const src = this.map.getSource('cities') as GeoJSONSource | undefined;
     const cur = this.current;
     if (!src || !this.active || !cur) return;
+    this.labelAt = performance.now();
+    const visible = labelFilter(this.map);
     const { def, f, w, days } = cur;
     const k = this.period.kind;
     if (k !== 'year') this.renderLegendWhen();
     src.setData({
       type: 'FeatureCollection',
       features: this.cities.map((c) => {
-        const ok = !f.flags || this.nearSea(f, c.lon, c.lat);
-        const v = ok ? this.sample(def, f, w, c.lon, c.lat, c.elev ?? demAt(this.dem, c.lon, c.lat), days) : NaN;
+        const ok = visible(c) && (!f.flags || this.nearSea(f, c.lon, c.lat));
+        // microclimate offsets only while the map shows them (zoomed in), so labels match the colours
+        const off = this.micro?.shown ? this.microFor(def, cityCoefs(c.mc, this.micro.scale), this.period) : 0;
+        const v = ok ? this.sample(def, f, w, c.lon, c.lat, c.elev ?? demAt(this.dem, c.lon, c.lat), days, off) : NaN;
         return {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
@@ -673,7 +702,7 @@ export class AtlasUI {
     sub.textContent = [place?.detail, coordLabel(lon, lat), units.imperial ? `${Math.round(elev * 3.281)} ft` : `${Math.round(elev)} m`].filter(Boolean).join(' · ');
 
     const ids = ['tmean', 'tmax', 'tmin', 'feels', 'sun', 'uv', 'precip', 'wetdays', 'snowfall', 'snowdays', 'dew', 'rh', 'wind', 'aqi', 'goodair', 'badair', 'sst'];
-    const loaded = await Promise.all(ids.map((id) => this.load(id).catch(() => null)));
+    const [loaded, mc] = await Promise.all([Promise.all(ids.map((id) => this.load(id).catch(() => null))), this.micro?.at(lon, lat).catch(() => null) ?? null]);
     if (this.cardAt?.[0] !== lon || this.cardAt?.[1] !== lat) return;
     const def = (id: string) => ATLAS_VARS.find((v) => v.id === id)!;
     /** total (sums) or average for a period */
@@ -682,7 +711,7 @@ export class AtlasUI {
       if (!f) return NaN;
       const d = def(id);
       if (f.flags && !this.nearSea(f, lon, lat)) return NaN;
-      return this.sample(d, f, periodWeights(p, f.nc), lon, lat, elev, d.sum ? periodDays(p) : 1);
+      return this.sample(d, f, periodWeights(p, f.nc), lon, lat, elev, d.sum ? periodDays(p) : 1, this.microFor(d, mc, p));
     };
     const YEAR: Period = { kind: 'year', m: 0, d: 0 };
     const y = (id: string) => at(id, YEAR);
@@ -724,7 +753,7 @@ export class AtlasUI {
       h(
         'div',
         { class: 'note' },
-        'Normals from 25 years of weather (ERA5 reanalysis, 2001–2025), blended from nearby ~100 km grid cells with temperatures, rain and snow adjusted to this spot’s elevation. Air quality: NOAA’s aerosol model matched to satellite and ground-monitor estimates (2021–2025). Hover a cell for details.',
+        `Normals from 25 years of weather (ERA5 reanalysis, 2001–2025), blended from nearby ~100 km grid cells with temperatures, rain and snow adjusted to this spot’s elevation${mc ? ', and temperatures to its local microclimate (WorldClim)' : ''}. Air quality: NOAA’s aerosol model matched to satellite and ground-monitor estimates (2021–2025). Hover a cell for details.`,
       ),
     );
   }

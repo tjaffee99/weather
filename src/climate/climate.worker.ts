@@ -388,35 +388,55 @@ function windowWeights(doy: number, half: number): Float32Array {
   return w;
 }
 
+/**
+ * Per year, the counts are also split by season (Dec-Feb, Mar-May, Jun-Aug,
+ * Sep-Nov) so the map can apply microclimate offsets that change through the
+ * year (micro.ts): result groups are [whole year, 4 seasons] x levels.
+ */
+const SEASON_OF = (d: number) => (d >= 334 || d < 59 ? 0 : d < 151 ? 1 : d < 243 ? 2 : 3);
+
 function query(crit: Criterion[], mode: 'days' | 'date', doy: number, half: number) {
   const p = prepare(crit);
   const { ncells, nx, ny } = cells;
-  const acc = new Float32Array(LEVELS * ncells);
-  let weights: Float32Array;
+  const days = meta.days;
+  let groups: Float32Array[];
   let norm: number;
   if (mode === 'days') {
-    weights = new Float32Array(meta.days).fill(1);
-    norm = 365 / meta.days;
+    norm = 365 / days;
+    groups = [new Float32Array(LEVELS * ncells)];
+    for (let s = 0; s < 4; s++) {
+      const w = new Float32Array(days);
+      for (let d = 0; d < days; d++) w[d] = SEASON_OF(d) === s ? 1 : 0;
+      const acc = new Float32Array(LEVELS * ncells);
+      accumulate(p, w, acc);
+      for (let i = 0; i < acc.length; i++) groups[0][i] += acc[i];
+      groups.push(acc);
+    }
   } else {
-    weights = windowWeights(doy, half);
+    const weights = windowWeights(doy, half);
     norm = 1 / weights.reduce((s, x) => s + x, 0);
+    groups = [new Float32Array(LEVELS * ncells)];
+    accumulate(p, weights, groups[0]);
   }
-  accumulate(p, weights, acc);
-  for (let i = 0; i < acc.length; i++) acc[i] *= norm;
+  for (const acc of groups) for (let i = 0; i < acc.length; i++) acc[i] *= norm;
+  const acc = groups[0];
   // stored as a fraction of days (0..1) in both modes; the colour scale is fixed
   const scaleMax = mode === 'days' ? 365 : 1;
-  const out = new Float32Array(LEVELS * nx * ny * 2);
-  for (let l = 0; l < LEVELS; l++)
-    for (let c = 0; c < ncells; c++) {
-      const o = ((l * ny + cellRow[c]) * nx + cellCol[c]) * 2;
-      out[o] = acc[l * ncells + c] / scaleMax;
-      out[o + 1] = 1;
-    }
+  const plane = nx * ny;
+  const out = new Float32Array(groups.length * LEVELS * plane * 2);
+  groups.forEach((g, gi) => {
+    for (let l = 0; l < LEVELS; l++)
+      for (let c = 0; c < ncells; c++) {
+        const o = (((gi * LEVELS + l) * ny + cellRow[c]) * nx + cellCol[c]) * 2;
+        out[o] = g[l * ncells + c] / scaleMax;
+        out[o + 1] = 1;
+      }
+  });
   // summary at sea-level-equivalent level for the UI
   const lvl0 = acc.subarray(4 * ncells, 5 * ncells);
   let any = 0;
   for (let c = 0; c < ncells; c++) if (lvl0[c] > (mode === 'days' ? 0.5 : 0.005)) any++;
-  return { out, scaleMax, coverage: any / ncells, levelValues: acc };
+  return { out, groups: groups.length, scaleMax, coverage: any / ncells, levelValues: acc };
 }
 
 function nearestCell(lon: number, lat: number): number {
@@ -464,7 +484,30 @@ function decodeValue(v: ClimVar, code: number): number {
  * the map (blend.ts), each cell's temperatures shifted to the point's
  * elevation, so the card agrees with the map colour and city label.
  */
-function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): DetailResult | null {
+/**
+ * Microclimate offsets for a card: curve coefficients (°C; highs then lows,
+ * MICRO_NC each, see micro.ts) and which of them the map applies to the
+ * conditions (1 highs, 2 lows, 3 both).
+ */
+interface DetailMicro {
+  coefs: number[];
+  v: 0 | 1 | 2 | 3;
+}
+const MICRO_NC = 5;
+
+/** A curve evaluated for every day of the year. */
+function curveDaily(c: number[], o: number, days: number): Float32Array {
+  const out = new Float32Array(days);
+  for (let d = 0; d < days; d++) {
+    const t = (d + 0.5) / 365;
+    let v = c[o];
+    for (let k = 1; 2 * k < MICRO_NC; k++) v += c[o + 2 * k - 1] * Math.cos(2 * Math.PI * k * t) + c[o + 2 * k] * Math.sin(2 * Math.PI * k * t);
+    out[d] = v;
+  }
+  return out;
+}
+
+function detail(lon: number, lat: number, demElev: number, crit: Criterion[], micro?: DetailMicro | null): DetailResult | null {
   const g = meta.grid;
   const elevAt = (p: number) => (cellIndex[p] < 0 ? undefined : cells.elev[cellIndex[p]]);
   let taps = blendTaps(g, elevAt, lon, lat, demElev).taps;
@@ -492,22 +535,43 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
     wsum[m][k] = (wsum[m][k] ?? 0) + w;
   };
 
+  // microclimate: daily offsets for highs and lows (card numbers), and the
+  // seasonal offset the map applies to the conditions as an elevation change
+  const hiD = micro ? curveDaily(micro.coefs, 0, days) : null;
+  const loD = micro ? curveDaily(micro.coefs, MICRO_NC, days) : null;
+  const seasonOff = [0, 0, 0, 0];
+  if (micro && micro.v) {
+    const n = [0, 0, 0, 0];
+    for (let d = 0; d < days; d++) {
+      const s = SEASON_OF(d);
+      seasonOff[s] += micro.v === 1 ? hiD![d] : micro.v === 2 ? loD![d] : (hiD![d] + loD![d]) / 2;
+      n[s]++;
+    }
+    for (let s = 0; s < 4; s++) seasonOff[s] /= Math.max(1, n[s]);
+  }
+
   for (const t of taps) {
     const c = cellIndex[t.p];
     const w = t.q / qsum;
     const shift = -LAPSE * t.dz;
     // matches are interpolated between the two nearest elevation levels, like the map
     const lvl = levelOf(t.dz);
-    const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
+    const seasonLvl = seasonOff.map((r) => {
+      const l = levelOf(t.dz - r / LAPSE);
+      const a = Math.floor(l);
+      return { l, l0: a, l1: Math.min(LEVELS - 1, a + 1), f: l - a, shift: shift + r };
+    });
     const m1 = new Float32Array(days);
     for (let d = 0, m = 0; d < days; d++) {
       const i = c * days + d;
       while (d >= MONTH_START[m + 1]) m++;
+      const sl = seasonLvl[SEASON_OF(d)];
+      const { l0, l1, f } = sl;
       p.conds.forEach((q, k) => {
         const miss = 1 - q.weight(i, cellRow[c], d, l0, l1, f);
         if (miss <= 0) return;
         // which side it misses on: the nearer bound
-        const v = q.value(i, cellRow[c], d, shift, lvl);
+        const v = q.value(i, cellRow[c], d, sl.shift, sl.l);
         const low = !Number.isFinite(q.hi) || (Number.isFinite(q.lo) && v - q.lo < q.hi - v);
         fails[m][k * 2 + (low ? 0 : 1)] += (w * miss) / (MONTH_START[m + 1] - MONTH_START[m]);
       });
@@ -523,7 +587,7 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
       const narrow = K.narrow[m], wide = K.wide[m];
       // rain and snow are scaled to the point's elevation level (1 for other variables)
       const fac = (v: ClimVar, d: number) => (isLevelVar(v) ? levelFactor(v, c, d, lvl) : 1);
-      const mean = (v: ClimVar, k: Float64Array, sh = 0) => {
+      const mean = (v: ClimVar, k: Float64Array, sh = 0, daily?: Float32Array | null) => {
         const arr = data[v];
         if (!arr) return undefined;
         const nodata = meta.vars[v].nodata;
@@ -533,7 +597,7 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
           if (!kd) continue;
           const code = arr[c * days + d];
           if (nodata !== undefined && code === nodata) continue;
-          s += kd * (decodeValue(v, code) * fac(v, d) + sh);
+          s += kd * (decodeValue(v, code) * fac(v, d) + sh + (daily ? daily[d] : 0));
           ws += kd;
         }
         return ws ? s / ws : undefined;
@@ -549,9 +613,9 @@ function detail(lon: number, lat: number, demElev: number, crit: Criterion[]): D
       let mt = 0;
       for (let d = 0; d < days; d++) mt += narrow[d] * m1[d];
       add(m, 'match', mt * n, w);
-      add(m, 'feels', mean('feels', narrow, shift), w);
-      add(m, 'tmax', mean('tmax', narrow, shift), w);
-      add(m, 'tmin', mean('tmin', narrow, shift), w);
+      add(m, 'feels', mean('feels', narrow, shift, hiD), w);
+      add(m, 'tmax', mean('tmax', narrow, shift, hiD), w);
+      add(m, 'tmin', mean('tmin', narrow, shift, loD), w);
       add(m, 'dew', mean('dew', narrow), w);
       add(m, 'sst', mean('sst', narrow), w);
       add(m, 'sun', mean('sun', narrow), w);
@@ -627,10 +691,10 @@ ctx.onmessage = async (e: MessageEvent) => {
       await need(m.crit.filter((c: Criterion) => c.v !== 'daylight').map((c: Criterion) => c.v));
       const t0 = performance.now();
       const r = query(m.crit, m.mode, m.doy, m.half);
-      post({ type: 'result', id: m.id, data: r.out, scaleMax: r.scaleMax, coverage: r.coverage, ms: performance.now() - t0 }, [r.out.buffer]);
+      post({ type: 'result', id: m.id, data: r.out, groups: r.groups, scaleMax: r.scaleMax, coverage: r.coverage, ms: performance.now() - t0 }, [r.out.buffer]);
     } else if (m.type === 'detail') {
       await need(m.vars);
-      post({ type: 'detail', id: m.id, result: detail(m.lon, m.lat, m.dem, m.crit) });
+      post({ type: 'detail', id: m.id, result: detail(m.lon, m.lat, m.dem, m.crit, m.micro) });
     }
   } catch (err) {
     post({ type: 'error', id: m.id, error: String((err as Error)?.message || err) });

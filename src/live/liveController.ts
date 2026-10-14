@@ -3,6 +3,7 @@
  * timeline (hourly steps cross-faded), city temperature labels and a
  * point-forecast card on click.
  */
+import { labelFilter } from '../map/labels';
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import { findLatestCycle, type Cycle, type LiveVar } from './gfs';
 import { HRRR_DOMAINS, type ConicGrid, type HrrrDomain } from './hrrr';
@@ -381,8 +382,9 @@ export class LiveController {
     const src = this.map.getSource('cities') as GeoJSONSource | undefined;
     if (!src) return;
     const show = this.layer.id === 'temp' || this.layer.id === 'feels';
+    const visible = labelFilter(this.map);
     const features = this.cities.map((c) => {
-      const v = show ? this.sample(c.lon, c.lat, undefined, undefined, undefined, undefined, c.elev ?? undefined) : NaN;
+      const v = show && visible(c) ? this.sample(c.lon, c.lat, undefined, undefined, undefined, undefined, c.elev ?? undefined) : NaN;
       return {
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },

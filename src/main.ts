@@ -14,6 +14,7 @@ import { $, h, clear } from './ui/dom';
 import { units } from './units';
 import { ClimateUI } from './climate/climateUi';
 import { AtlasUI } from './climate/atlasUi';
+import { Microclimate } from './climate/micro';
 
 const BASE = import.meta.env.BASE_URL;
 type Mode = 'climate' | 'atlas' | 'live';
@@ -63,7 +64,7 @@ map.addControl(
   new maplibregl.AttributionControl({
     compact: true,
     customAttribution:
-      'Map forecast: <a href="https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast">NOAA GFS</a>, <a href="https://rapidrefresh.noaa.gov/hrrr/">HRRR</a> and <a href="https://registry.opendata.aws/noaa-gefs/">GEFS-Aerosols</a> · Radar: <a href="https://www.rainviewer.com/">RainViewer</a> · Satellite: <a href="https://view.eumetsat.int/">EUMETSAT</a> · Air-quality correction: <a href="https://sites.wustl.edu/acag/surface-pm2-5/">ACAG V6.GL.03</a> · Point forecasts: <a href="https://open-meteo.com/">Open-Meteo</a> · Places: <a href="https://nominatim.org/">Nominatim</a> · Climate: <a href="https://cds.climate.copernicus.eu/">Copernicus ERA5</a> via <a href="https://github.com/google-research/arco-era5">ARCO-ERA5</a> · <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://www.naturalearthdata.com/">Natural Earth</a>',
+      'Map forecast: <a href="https://www.ncei.noaa.gov/products/weather-climate-models/global-forecast">NOAA GFS</a>, <a href="https://rapidrefresh.noaa.gov/hrrr/">HRRR</a> and <a href="https://registry.opendata.aws/noaa-gefs/">GEFS-Aerosols</a> · Radar: <a href="https://www.rainviewer.com/">RainViewer</a> · Satellite: <a href="https://view.eumetsat.int/">EUMETSAT</a> · Air-quality correction: <a href="https://sites.wustl.edu/acag/surface-pm2-5/">ACAG V6.GL.03</a> · Point forecasts: <a href="https://open-meteo.com/">Open-Meteo</a> · Places: <a href="https://nominatim.org/">Nominatim</a> · Climate: <a href="https://cds.climate.copernicus.eu/">Copernicus ERA5</a> via <a href="https://github.com/google-research/arco-era5">ARCO-ERA5</a> · Microclimates: <a href="https://www.worldclim.org/">WorldClim</a> · Towns: <a href="https://www.geonames.org/">GeoNames</a> · <a href="https://openfreemap.org">OpenFreeMap</a> © <a href="https://www.openmaptiles.org/">OpenMapTiles</a> © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> · <a href="https://www.naturalearthdata.com/">Natural Earth</a>',
   }),
   'bottom-right',
 );
@@ -77,6 +78,7 @@ let live: LiveController;
 let liveUi: LiveUI;
 let climateUi: ClimateUI;
 let atlasUi: AtlasUI;
+let micro: Microclimate;
 let liveReadyResolve: () => void = () => {};
 const liveReady = new Promise<void>((r) => (liveReadyResolve = r));
 let cities: City[] = [];
@@ -147,6 +149,7 @@ async function setMode(m: Mode) {
   if (prev === 'atlas') atlasUi.exit();
   setWaterForMode(m);
   updateUrlMode();
+  micro?.setActive(m !== 'live');
   if (m === 'live') {
     liveUi.enter();
     await liveReady;
@@ -262,6 +265,12 @@ document.addEventListener('keydown', (e) => {
 });
 
 map.on('click', (e) => openAt(e.lngLat.lng, e.lngLat.lat));
+// value labels are only computed for cities on screen: refresh them after each move
+map.on('moveend', () => {
+  if (mode === 'climate') climateUi?.updateCities();
+  else if (mode === 'atlas') atlasUi?.updateCities();
+  else if (mode === 'live') live?.updateCities();
+});
 
 // keep the visible map centred in the area not covered by the side panel
 function applyPadding() {
@@ -296,6 +305,15 @@ map.on('load', async () => {
     climateUi.liveReady = liveReady;
     climateUi.nowCard = (lon, lat, placeP) => liveUi.showCard(lon, lat, placeP ?? reverseGeocode(lon, lat, cities));
     atlasUi = new AtlasUI(map, field, els, climateUi, cities, dem, setStatus, BASE);
+    // microclimates (fog coasts, inland heat, ...) for the finder and atlas when zoomed in
+    micro = new Microclimate(BASE, map);
+    micro.onUpdate = (m) => {
+      field.setMicro(m, micro.scale);
+      if (mode === 'climate') climateUi.updateCities();
+      else if (mode === 'atlas') atlasUi.updateCities();
+    };
+    climateUi.micro = micro;
+    atlasUi.micro = micro;
     const startLive = () =>
       live
         .init()

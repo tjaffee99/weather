@@ -20,7 +20,9 @@ import { MONTHS, MONTH_START, coordLabel, doyLabel, timeLabel, todayDoy } from '
 import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
 import { CRITERIA, GROUPS, PRESETS, type CritDef, type CritState } from './criteria';
 import { blendTaps, levelOf } from './blend';
+import { labelFilter } from '../map/labels';
 import { hideTip, monthTable, sourceNote, summary, yearChart } from './card';
+import { SEASON_WEIGHTS, cityCoefs, microOffset, seasonOf, type MicroCoefs, type MicroVar, type Microclimate } from './micro';
 import { DZ0, DZ_STEP, LEVELS, type ClimVar, type ClimateMeta, type CritVar, type Criterion, type DetailResult } from './types';
 
 type Els = { panel: HTMLElement; bottom: HTMLElement; legend: HTMLElement; card: HTMLElement };
@@ -75,7 +77,7 @@ export class ClimateUI {
   private seq = 0;
   private inflight = false;
   private dirty = false;
-  private result?: { data: Float32Array; scaleMax: number; mode: Mode; doy: number };
+  private result?: { data: Float32Array; groups: number; scaleMax: number; mode: Mode; doy: number };
   cellElevTex?: Float32Array;
   private pending = new Map<number, (m: any) => void>(); // eslint-disable-line @typescript-eslint/no-explicit-any
   private progress = new Map<string, [number, number]>();
@@ -95,6 +97,7 @@ export class ClimateUI {
   private nowTemp?: Float32Array;
   private nowTimer = 0;
   live?: LiveController;
+  micro?: Microclimate;
   liveReady: Promise<void> = Promise.resolve();
   nowCard?: (lon: number, lat: number, placeP?: Promise<Place | null>) => void;
 
@@ -237,12 +240,13 @@ export class ClimateUI {
       .then((m) => {
         if (!this.active) return;
         console.debug(`climate query (${mode}) ${m.ms.toFixed(0)} ms`);
-        this.result = { data: m.data, scaleMax: m.scaleMax, mode, doy };
+        this.result = { data: m.data, groups: m.groups ?? 1, scaleMax: m.scaleMax, mode, doy };
         if (this.mode !== mode) return;
         if (this.lastMode !== mode) this.field.setPalette(SCORE);
         this.field.mode = 1;
         this.field.climateSqrt = true;
-        this.field.setClimateResult(m.data);
+        this.applyMicro();
+        this.field.setClimateResult(m.data, this.result.groups);
         this.applyCut();
         if (this.field.fade < 1 && this.lastMode !== mode) this.field.fadeTo(1, 280);
         this.lastMode = mode;
@@ -707,21 +711,55 @@ export class ClimateUI {
   }
 
   /** Sample the result at a point, blending cells exactly like the shader (see blend.ts). */
-  private sampleResult(lon: number, lat: number, elev?: number): number {
+  private sampleResult(lon: number, lat: number, elev?: number, mc?: MicroCoefs | null): number {
     const r = this.result, g = this.meta?.grid, et = this.cellElevTex;
     if (!r || !g || !et) return NaN;
     const z = elev ?? demAt(this.dem, lon, lat);
-    const { taps, cover } = blendTaps(g, (p) => (et[p * 2 + 1] ? et[p * 2] : undefined), lon, lat, z);
-    if (cover < 0.04) return NaN;
     const n = g.nx * g.ny;
-    let v = 0, sq = 0;
-    for (const t of taps) {
-      const lvl = levelOf(t.dz);
-      const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
-      v += t.q * ((1 - f) * r.data[(l0 * n + t.p) * 2] + f * r.data[(l1 * n + t.p) * 2]);
-      sq += t.q;
-    }
-    return (v / Math.max(sq, 1e-20)) * (r.mode === 'days' ? r.scaleMax : 1);
+    // a blend at elevation zz from result group gi (as the shader's climBlend)
+    const blend = (zz: number, gi: number) => {
+      const { taps, cover } = blendTaps(g, (p) => (et[p * 2 + 1] ? et[p * 2] : undefined), lon, lat, zz);
+      if (cover < 0.04) return NaN;
+      let v = 0, sq = 0;
+      const o = gi * LEVELS;
+      for (const t of taps) {
+        const lvl = levelOf(t.dz);
+        const l0 = Math.floor(lvl), l1 = Math.min(LEVELS - 1, l0 + 1), f = lvl - l0;
+        v += t.q * ((1 - f) * r.data[((o + l0) * n + t.p) * 2] + f * r.data[((o + l1) * n + t.p) * 2]);
+        sq += t.q;
+      }
+      return v / Math.max(sq, 1e-20);
+    };
+    // microclimate: a spot warmer than its cells matches like a lower one (same rules as the shader)
+    const mv = this.microVar();
+    let v: number;
+    if (mc && mv && r.groups > 1) {
+      const annual = microOffset(mc, mv, [1, 0, 0, 0, 0]);
+      const rs = SEASON_WEIGHTS.map((w) => microOffset(mc, mv, w));
+      v = Math.max(...rs.map((x) => Math.abs(x - annual))) > 0.25 ? rs.reduce((s, x, i) => s + blend(z - x / LAPSE, 1 + i), 0) : blend(z - annual / LAPSE, 0);
+    } else if (mc && mv) {
+      v = blend(z - microOffset(mc, mv, SEASON_WEIGHTS[seasonOf(r.doy)]) / LAPSE, 0);
+    } else v = blend(z, 0);
+    return v * (r.mode === 'days' ? r.scaleMax : 1);
+  }
+
+  /** Which microclimate offset the conditions use: highs (feels-like, highs), lows, or both. */
+  private microVar(): MicroVar {
+    const vs = Object.keys(this.state);
+    const hi = vs.includes('feels') || vs.includes('tmax'), lo = vs.includes('tmin');
+    return hi && lo ? 3 : hi ? 1 : lo ? 2 : 0;
+  }
+
+  /** Hand the microclimate settings for the current conditions and date to the map. */
+  private applyMicro() {
+    this.field.microVar = this.microVar();
+    this.field.microW.set(SEASON_WEIGHTS[seasonOf(this.doy)]);
+    SEASON_WEIGHTS.forEach((w, s) => this.field.microSeasonW.set(w, s * 5));
+  }
+
+  /** Offsets used for labels: only while the map shows them (zoomed in), so labels match the colours. */
+  private cityMicro(c: City): MicroCoefs | null {
+    return this.micro?.shown ? cityCoefs(c.mc, this.micro.scale) : null;
   }
 
   private formatScore(v: number) {
@@ -737,7 +775,7 @@ export class ClimateUI {
       if (orog) t += LAPSE * (bilinear(orog, c.lon, c.lat) - (c.elev ?? demAt(this.dem, c.lon, c.lat)));
       return `✓ ${fmt('temp', t)}`;
     }
-    const v = this.sampleResult(c.lon, c.lat, c.elev ?? undefined);
+    const v = this.sampleResult(c.lon, c.lat, c.elev ?? undefined, this.cityMicro(c));
     const r = this.result;
     if (r && Number.isFinite(v)) {
       const below = r.mode === 'days' ? this.cut.days > 0 && v < this.cut.days : this.cut.date > 0 && v < this.cut.date;
@@ -746,15 +784,16 @@ export class ClimateUI {
     return this.formatScore(v);
   }
 
-  private updateCities() {
+  updateCities() {
     const src = this.map.getSource('cities') as GeoJSONSource | undefined;
     if (!src || !this.active) return;
+    const visible = labelFilter(this.map);
     src.setData({
       type: 'FeatureCollection',
       features: this.cities.map((c) => ({
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
-        properties: { name: c.name, label: this.cityLabel(c), rank: c.rank, minzoom: c.minzoom },
+        properties: { name: c.name, label: visible(c) ? this.cityLabel(c) : '', rank: c.rank, minzoom: c.minzoom },
       })),
     });
   }
@@ -830,7 +869,9 @@ export class ClimateUI {
   }
 
   private async detail(lon: number, lat: number, dem: number, crit: Criterion[], vars: ClimVar[]): Promise<DetailResult | null> {
-    const m = await this.call({ type: 'detail', lon, lat, dem, crit, vars: [...new Set(vars)] });
+    const mc = (await this.micro?.at(lon, lat).catch(() => null)) ?? null;
+    const micro = mc ? { coefs: Array.from(mc), v: this.microVar() } : null;
+    const m = await this.call({ type: 'detail', lon, lat, dem, crit, vars: [...new Set(vars)], micro });
     this.setStatus('');
     return m.result;
   }

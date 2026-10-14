@@ -7,6 +7,7 @@ import { coordLabel, timeLabel } from '../ui/format';
 import { colorAt, GLACIER, TEMPERATURE } from '../map/palettes';
 import { condition, openMeteo, type Hour, type PointForecast } from './pointForecast';
 import { pm25FromAqi } from './aerosol';
+import { CARD_TITLES, layerCard, type CardKind } from './layerCard';
 import { pointElevation } from '../map/localDem';
 import { demAt, type Dem } from '../data';
 import type { Place } from '../geocode';
@@ -23,6 +24,21 @@ export class LiveUI {
   /** last chosen variant per layer (e.g. temperature → feels like); clouds open on the satellite view */
   private variant = new Map<LiveVar, LiveVar>([['cloud', 'satellite']]);
   private obsTimer = 0;
+  /** the open location card: its forecast is kept so switching layers redraws it instantly */
+  private card?: {
+    lon: number;
+    lat: number;
+    at: number;
+    fc?: PointForecast;
+    error?: string;
+    title: HTMLElement;
+    sub: HTMLElement;
+    body: HTMLElement;
+    /** the full forecast, opened from a layer's card */
+    full: boolean;
+    air?: [number, number][];
+    airLoading?: boolean;
+  };
 
   constructor(
     private c: LiveController,
@@ -76,6 +92,7 @@ export class LiveUI {
               if (active) return;
               this.c.setLayer(variants.length ? this.variant.get(l.id) ?? l.id : l.id);
               this.renderPanel();
+              this.refreshCard(true);
             },
           },
           h('span', { class: 'ic', 'aria-hidden': 'true' }, l.icon),
@@ -88,6 +105,7 @@ export class LiveUI {
           this.variant.set(l.id, id);
           if (id !== this.c.layer.id) this.c.setLayer(id);
           this.renderPanel();
+          this.refreshCard(true);
         };
         list.append(
           h(
@@ -290,17 +308,36 @@ export class LiveUI {
     if (btn) btn.textContent = '▶';
   }
 
+  /** Which card the current layer gets: null = the full forecast (temperature layers). */
+  private cardKind(): CardKind | null {
+    const id = this.c.layer.variantOf ?? this.c.layer.id;
+    switch (id) {
+      case 'precip':
+      case 'cloud':
+      case 'uv':
+      case 'aqi':
+      case 'snow':
+      case 'wind':
+      case 'humidity':
+        return id;
+      default:
+        return null;
+    }
+  }
+
   async showCard(lon: number, lat: number, placeP: Promise<Place | null>) {
     const card = this.els.card;
     const token = ++this.cardToken;
     const at = this.c.time;
     clear(card);
     card.classList.remove('hidden');
-    const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => this.onCardClose() }, '✕');
+    const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => ((this.card = undefined), this.onCardClose()) }, '✕');
     const title = h('div', { class: 'place' }, '…');
     const sub = h('div', { class: 'coords' }, coordLabel(lon, lat));
     const body = h('div', { class: 'card-body' }, h('div', { class: 'desc' }, 'Loading forecast…'));
     card.append(close, title, sub, body);
+    this.card = { lon, lat, at, title, sub, body, full: false };
+    this.refreshCard();
 
     const elevP = pointElevation(lon, lat).catch(() => null);
     placeP
@@ -321,15 +358,70 @@ export class LiveUI {
         const elev = (await elevP) ?? demAt(this.dem, lon, lat);
         fc = await this.c.gfsPoint(lon, lat, elev);
       } catch (e) {
-        if (token === this.cardToken) body.replaceChildren(h('div', { class: 'desc' }, `Forecast unavailable: ${(e as Error).message}`));
+        if (token === this.cardToken && this.card) {
+          this.card.error = `Forecast unavailable: ${(e as Error).message}`;
+          this.refreshCard();
+        }
         return;
       }
     }
-    if (token !== this.cardToken || !fc.hours.length) return;
+    if (token !== this.cardToken || !fc.hours.length || !this.card) return;
     fc.air = (await airP) ?? undefined;
+    this.card.fc = fc;
     const elev = await elevP;
     if (elev !== null && token === this.cardToken) sub.textContent += ` · ${Math.round(elev)} m`;
-    body.replaceChildren(...renderForecast(fc, at));
+    this.refreshCard();
+  }
+
+  /** Draw the open card for the current layer (layerChanged: back to that layer's own card). */
+  private refreshCard(layerChanged = false) {
+    const st = this.card;
+    if (!st || this.els.card.classList.contains('hidden')) return;
+    if (layerChanged) st.full = false;
+    const kind = this.cardKind();
+    const compact = kind !== null && !st.full;
+    this.els.card.classList.toggle('compact', compact);
+    if (st.error) {
+      st.body.replaceChildren(h('div', { class: 'desc' }, st.error));
+      return;
+    }
+    if (!st.fc) {
+      st.body.replaceChildren(h('div', { class: 'desc' }, 'Loading forecast…'));
+      return;
+    }
+    if (kind === 'aqi' && !st.air && !st.airLoading) this.loadAirSeries();
+    if (!compact) {
+      const back = kind ? h('button', { class: 'lc-switch', onclick: () => ((st.full = false), this.refreshCard()) }, `‹ ${CARD_TITLES[kind]}`) : null;
+      st.body.replaceChildren(...(back ? [back] : []), ...renderForecast(st.fc, st.at));
+      return;
+    }
+    st.body.replaceChildren(
+      h('div', { class: 'lc-title' }, CARD_TITLES[kind!]),
+      ...layerCard(kind!, { fc: st.fc, at: st.at, air: st.air }),
+      h('button', { class: 'lc-switch', onclick: () => ((st.full = true), this.refreshCard()) }, 'Full forecast ›'),
+    );
+  }
+
+  /** Air quality every 6 hours for two days, from the corrected aerosol forecast (filled in as it loads). */
+  private async loadAirSeries() {
+    const st = this.card;
+    if (!st) return;
+    st.airLoading = true;
+    const start = Math.floor(st.at / (3 * HOUR)) * 3 * HOUR;
+    const series: [number, number][] = [];
+    for (let k = 0; k <= 8; k++) {
+      const t = start + k * 6 * HOUR;
+      if (this.c.maxTime && t > this.c.maxTime) break;
+      const a = await this.c.aqiAt(st.lon, st.lat, t).catch(() => NaN);
+      if (this.card !== st) return;
+      if (Number.isFinite(a)) series.push([t, a]);
+      if (series.length >= 2 && (k % 2 === 0 || k === 8)) {
+        st.air = [...series];
+        if (this.cardKind() === 'aqi') this.refreshCard();
+      }
+    }
+    st.air = series;
+    if (this.cardKind() === 'aqi') this.refreshCard();
   }
 }
 

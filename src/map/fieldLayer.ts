@@ -70,6 +70,13 @@ uniform float u_opacity;
 uniform float u_cut;           // climate: values below are dimmed
 uniform float u_csqrt;         // climate: 1 = square-root scale (fraction of days), 0 = values as they are (atlas)
 uniform sampler2D u_under;     // copy of the map drawn so far (for u_waterMask)
+uniform mediump sampler2DArray u_micro; // microclimate offsets (climate/micro.ts): 3 RGBA snorm layers
+uniform vec4 u_microExt;       // their extent: west lon, north lat, width, height (deg); width 0 = none
+uniform float u_microScale;    // °C per unit of the snorm value
+uniform int u_microVar;        // 0 none, 1 daytime highs, 2 night lows, 3 both
+uniform float u_microW[5];     // curve weights for the shown period
+uniform float u_microSeasonW[20]; // finder per year: weights for each season
+uniform int u_groups;          // climate result groups: 1, or 5 = whole year + 4 seasons
 uniform vec4 u_waterMask;      // a = 1: draw only where the map underneath is this water colour (rgb)
 
 const float PI = 3.141592653589793;
@@ -141,6 +148,67 @@ float regional(float v, sampler2D t, vec4 cone, vec4 g, float lon, float lat) {
   return mix(v, r, smoothstep(0.0, 16.0, edge) * cone.w);
 }
 
+const float LAPSE_C = 0.0065;
+
+// Microclimate offset curves at this point: tmax c0-c4, tmin c0-c4 (°C).
+bool microCoefs(float lon, float lat, out float c[10]) {
+  if (u_microExt.z <= 0.0 || u_microVar == 0) return false;
+  float u = mod(lon - u_microExt.x, 360.0) / u_microExt.z;
+  float v = (u_microExt.y - lat) / u_microExt.w;
+  if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return false;
+  vec4 a = texture(u_micro, vec3(u, v, 0.0)) * u_microScale;
+  vec4 b = texture(u_micro, vec3(u, v, 1.0)) * u_microScale;
+  vec4 d = texture(u_micro, vec3(u, v, 2.0)) * u_microScale;
+  c = float[10](a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w, d.x, d.y);
+  return true;
+}
+
+// The offset for the chosen temperatures, with curve weights w[o..o+4] (o = 0 or a season's 5*s).
+float microOff(float c[10], int season) {
+  float hi = 0.0, lo = 0.0;
+  for (int k = 0; k < 5; k++) {
+    float w = season == -2 ? (k == 0 ? 1.0 : 0.0) : season < 0 ? u_microW[k] : u_microSeasonW[season * 5 + k];
+    hi += w * c[k];
+    lo += w * c[5 + k];
+  }
+  return u_microVar == 1 ? hi : u_microVar == 2 ? lo : 0.5 * (hi + lo);
+}
+
+// Same rules as src/climate/blend.ts: B-spline over the 4x4 nearby cells, each
+// evaluated at elevation z; cells that can't reach it fade out. Result group g.
+float climBlend(vec2 x, float z, int g, out float cover) {
+  vec2 i0 = floor(x);
+  vec4 wx4 = cubicW(x.x - i0.x), wy4 = cubicW(x.y - i0.y);
+  float wx[4] = float[4](wx4.x, wx4.y, wx4.z, wx4.w);
+  float wy[4] = float[4](wy4.x, wy4.y, wy4.z, wy4.w);
+  float lmax = u_levels.x - 1.0;
+  int base = g * int(u_levels.x);
+  float sv = 0.0, sq = 0.0;
+  cover = 0.0;
+  for (int j = 0; j < 4; j++) {
+    int yy = int(i0.y) + j - 1;
+    if (yy < 0 || yy >= int(u_cgridSize.y)) continue;
+    for (int i = 0; i < 4; i++) {
+      int xx = int(mod(i0.x + float(i - 1), u_cgridSize.x));
+      vec2 ce = texelFetch(u_cellElev, ivec2(xx, yy), 0).rg;
+      if (ce.y < 0.5) continue;
+      // cells without a value (e.g. sea temperature inland) leave a gap
+      if (texelFetch(u_result, ivec3(xx, yy, base), 0).g < 0.5) continue;
+      float w = wx[i] * wy[j];
+      cover += w;
+      float want = (z - ce.x - u_levels.y) / u_levels.z;
+      float lc = clamp(want, 0.0, lmax);
+      float q = w * exp(-abs(want - lc) * u_levels.z / ${EXCESS_SCALE.toFixed(1)});
+      float l0 = floor(lc);
+      float a = texelFetch(u_result, ivec3(xx, yy, base + int(l0)), 0).r;
+      float b = texelFetch(u_result, ivec3(xx, yy, base + int(min(l0 + 1.0, lmax))), 0).r;
+      sv += q * mix(a, b, lc - l0);
+      sq += q;
+    }
+  }
+  return sv / max(sq, 1e-20);
+}
+
 vec4 shade(float v, float altMix) {
   float x = u_log == 1 ? log(max(v, 1e-4)) : v;
   float t = clamp((x - u_domain.x) / (u_domain.y - u_domain.x), 0.0, 1.0);
@@ -197,39 +265,35 @@ void main() {
     }
     col = shade(q, 0.0);
   } else {
-    // Same rules as src/climate/blend.ts: B-spline over the 4x4 nearby cells,
-    // each evaluated at this pixel's elevation; cells that can't reach it fade out.
     vec2 x = vec2((lon - u_cgrid.x) / u_cgrid.z, (u_cgrid.y - lat) / u_cgrid.w);
-    vec2 i0 = floor(x);
-    vec4 wx4 = cubicW(x.x - i0.x), wy4 = cubicW(x.y - i0.y);
-    float wx[4] = float[4](wx4.x, wx4.y, wx4.z, wx4.w);
-    float wy[4] = float[4](wy4.x, wy4.y, wy4.z, wy4.w);
     float z = demElev(lon, lat);
-    float lmax = u_levels.x - 1.0;
-    float sv = 0.0, sq = 0.0, cover = 0.0;
-    for (int j = 0; j < 4; j++) {
-      int yy = int(i0.y) + j - 1;
-      if (yy < 0 || yy >= int(u_cgridSize.y)) continue;
-      for (int i = 0; i < 4; i++) {
-        int xx = int(mod(i0.x + float(i - 1), u_cgridSize.x));
-        vec2 ce = texelFetch(u_cellElev, ivec2(xx, yy), 0).rg;
-        if (ce.y < 0.5) continue;
-        // cells without a value (e.g. sea temperature inland) leave a gap
-        if (texelFetch(u_result, ivec3(xx, yy, 0), 0).g < 0.5) continue;
-        float w = wx[i] * wy[j];
-        cover += w;
-        float want = (z - ce.x - u_levels.y) / u_levels.z;
-        float lc = clamp(want, 0.0, lmax);
-        float q = w * exp(-abs(want - lc) * u_levels.z / ${EXCESS_SCALE.toFixed(1)});
-        float l0 = floor(lc);
-        float a = texelFetch(u_result, ivec3(xx, yy, int(l0)), 0).r;
-        float b = texelFetch(u_result, ivec3(xx, yy, int(min(l0 + 1.0, lmax))), 0).r;
-        sv += q * mix(a, b, lc - l0);
-        sq += q;
+    float mc[10];
+    bool micro = microCoefs(lon, lat, mc);
+    float cover, v;
+    if (u_csqrt < 0.5) {
+      // atlas: the microclimate offset adds to the temperature
+      v = climBlend(x, z, 0, cover);
+      if (micro) v += microOff(mc, -1);
+    } else {
+      // finder: a pixel warmer than its cells matches like a lower one (r / lapse rate)
+      float r = micro ? microOff(mc, u_groups > 1 ? -2 : -1) : 0.0;
+      float rs[4] = float[4](0.0, 0.0, 0.0, 0.0);
+      float spread = 0.0;
+      if (micro && u_groups > 1) {
+        for (int s = 0; s < 4; s++) {
+          rs[s] = microOff(mc, s);
+          spread = max(spread, abs(rs[s] - r));
+        }
+      }
+      if (spread > 0.25) {
+        // offsets that change with the seasons (foggy summers): count each season at its own offset
+        v = 0.0;
+        for (int s = 0; s < 4; s++) v += climBlend(x, z - rs[s] / LAPSE_C, 1 + s, cover);
+      } else {
+        v = climBlend(x, z - r / LAPSE_C, 0, cover);
       }
     }
     if (cover < 0.04) discard;
-    float v = sv / max(sq, 1e-20);
     // finder: fixed square-root scale of the fraction of matching days, so a
     // colour always means the same number of days and rare matches stay visible
     col = shade(u_csqrt > 0.5 ? sqrt(max(v, 0.0)) : v, 0.0);
@@ -276,6 +340,7 @@ const UNIFORMS = [
   'u_mode', 'u_fieldA', 'u_fieldB', 'u_alt', 'u_orog', 'u_dem', 'u_palette', 'u_result', 'u_cellElev',
   'u_grid', 'u_gridSize', 'u_cgrid', 'u_cgridSize', 'u_levels', 'u_mix', 'u_domain', 'u_log',
   'u_lapse', 'u_snowH', 'u_useAlt', 'u_opacity', 'u_cut', 'u_csqrt', 'u_under', 'u_waterMask', 'u_ldem', 'u_ldemExt',
+  'u_micro', 'u_microExt', 'u_microScale', 'u_microVar', 'u_microW', 'u_microSeasonW', 'u_groups',
   'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy', 'u_reg0', 'u_reg1', 'u_rcone', 'u_rgrid',
 ];
 
@@ -309,6 +374,13 @@ export class FieldLayer implements CustomLayerInterface {
    */
   waterOnly: [number, number, number] | null = null;
   private underSize: [number, number] = [0, 0];
+  /** microclimate offsets: which temperatures (0 none), curve weights for the period, per season */
+  microVar: 0 | 1 | 2 | 3 = 0;
+  microW = new Float32Array([1, 0, 0, 0, 0]);
+  microSeasonW = new Float32Array(20);
+  private microExt: [number, number, number, number] = [0, 0, 0, 0];
+  private microScale = 0;
+  private groups = 1;
   useAlt = 0;
   opacity = 1;
   /** climate mode: normalised value below which results are dimmed (0 = off) */
@@ -371,6 +443,10 @@ export class FieldLayer implements CustomLayerInterface {
     this.tex.result = this.makeArray(1, 1, 1, new Float32Array([0, 0]));
     this.tex.ldem = this.makeTex2D(1, 1, new Float32Array([0]), 1);
     this.tex.mfields = this.makeArrayR(1, 1, 1, new Float32Array([0]));
+    this.tex.micro = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.tex.micro);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8_SNORM, 1, 1, 3, 0, gl.RGBA, gl.BYTE, new Int8Array(12));
+    this.setParams(gl.TEXTURE_2D_ARRAY, gl.CLAMP_TO_EDGE);
     this.tex.under = gl.createTexture()!;
     gl.bindTexture(gl.TEXTURE_2D, this.tex.under);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB8, 1, 1, 0, gl.RGB, gl.UNSIGNED_BYTE, new Uint8Array(3));
@@ -530,11 +606,27 @@ export class FieldLayer implements CustomLayerInterface {
     this.tex.cellElev = this.makeTex2D(spec.nx, spec.ny, cellElevPremult, 2, this.tex.cellElev);
   }
 
-  /** RG pairs (value*valid, valid), layer-major: [level][row][col]. */
-  setClimateResult(data: Float32Array) {
+  /** RG pairs (value*valid, valid), layer-major: [group][level][row][col]; groups = 1, or 5 (year + 4 seasons). */
+  setClimateResult(data: Float32Array, groups = 1) {
     const c = this.cgrid!;
-    this.tex.result = this.makeArray(c.nx, c.ny, c.levels, data, this.tex.result);
+    this.groups = groups;
+    this.tex.result = this.makeArray(c.nx, c.ny, c.levels * groups, data, this.tex.result);
     this.hasResult = true;
+    this.repaint();
+  }
+
+  /** Microclimate offsets for the viewport (climate/micro.ts), or null. */
+  setMicro(m: { width: number; height: number; data: Int8Array; extent: [number, number, number, number] } | null, scale = 0.1) {
+    const gl = this.gl;
+    if (!gl) return;
+    if (m) {
+      gl.bindTexture(gl.TEXTURE_2D_ARRAY, this.tex.micro!);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.RGBA8_SNORM, m.width, m.height, 3, 0, gl.RGBA, gl.BYTE, m.data);
+      this.setParams(gl.TEXTURE_2D_ARRAY, gl.CLAMP_TO_EDGE);
+      this.microExt = m.extent;
+      this.microScale = 127 * scale;
+    } else this.microExt = [0, 0, 0, 0];
     this.repaint();
   }
 
@@ -639,6 +731,13 @@ export class FieldLayer implements CustomLayerInterface {
       gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, w, h);
     }
     bind(12, 'under', gl.TEXTURE_2D, 'u_under');
+    bind(13, 'micro', gl.TEXTURE_2D_ARRAY, 'u_micro');
+    gl.uniform4f(p.u.u_microExt, ...this.microExt);
+    gl.uniform1f(p.u.u_microScale, this.microScale);
+    gl.uniform1i(p.u.u_microVar, this.mode === 1 ? this.microVar : 0);
+    gl.uniform1fv(p.u.u_microW, this.microW);
+    gl.uniform1fv(p.u.u_microSeasonW, this.microSeasonW);
+    gl.uniform1i(p.u.u_groups, this.groups);
     const wm = this.waterOnly;
     gl.uniform4f(p.u.u_waterMask, wm?.[0] ?? 0, wm?.[1] ?? 0, wm?.[2] ?? 0, wm ? 1 : 0);
     const rc = new Float32Array(8), rg = new Float32Array(8);

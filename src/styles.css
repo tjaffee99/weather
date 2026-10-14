@@ -811,6 +811,127 @@ button {
   padding: 16px;
   z-index: 11;
 }
+/* lighter cards for the live layers other than temperature (live/layerCard.ts) */
+.card.compact {
+  width: 330px;
+}
+.lc-title {
+  font-size: 10.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+  margin: 10px 0 2px;
+}
+.lc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 2px 0 4px;
+}
+.lc-value {
+  font-size: 38px;
+  font-weight: 650;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.lc-word {
+  font-weight: 600;
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.lc-chip {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.15);
+}
+.lc-sub {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.lc-arrow {
+  display: inline-block;
+  font-size: 22px;
+  color: var(--muted);
+}
+.lc-say {
+  font-size: 13.5px;
+  line-height: 1.4;
+  margin: 6px 0 8px;
+}
+.lc-chart svg {
+  display: block;
+  overflow: visible;
+}
+.lc-bars .lc-back {
+  fill: rgba(70, 110, 170, 0.14);
+}
+.lc-bars .lc-now {
+  stroke: rgba(20, 24, 30, 0.55);
+  stroke-width: 1;
+}
+.lc-bars .lc-val {
+  font-size: 8.5px;
+  fill: var(--muted);
+}
+.lc-bars .lc-axis {
+  font-size: 9px;
+  fill: var(--faint);
+}
+.lc-legend {
+  font-size: 11px;
+  color: var(--faint);
+  margin: 2px 0 8px;
+}
+.lc-facts,
+.lc-days {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+}
+.lc-fact,
+.lc-day {
+  flex: 1;
+  min-width: 0;
+  background: var(--fill);
+  border-radius: 10px;
+  padding: 6px 9px;
+}
+.lc-fact .k,
+.lc-day-name,
+.lc-day-note {
+  font-size: 11px;
+  color: var(--muted);
+}
+.lc-fact .v {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.lc-day {
+  text-align: center;
+  padding: 6px 2px;
+}
+.lc-day-main {
+  font-weight: 650;
+  font-size: 13px;
+}
+.lc-switch {
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 6px 0 0;
+}
 .card .close {
   position: absolute;
   top: 10px;
@@ -1242,5 +1363,8 @@ table.normals.heat tr:first-child td {
     top: auto;
     bottom: 8px;
     max-height: 60%;
+  }
+  .card.compact {
+    width: auto;
   }
 }

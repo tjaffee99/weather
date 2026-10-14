@@ -71,11 +71,13 @@ export interface City {
   rank: number;
   /** metres above sea level (GeoNames SRTM), if known */
   elev: number | null;
+  /** microclimate offset curves (climate/micro.ts), stored integers */
+  mc?: number[] | null;
 }
 
 export async function loadCities(base: string): Promise<City[]> {
   const j = await (await fetch(`${base}data/cities.json`)).json();
-  return (j.rows as [string, string, number, number, number, number, number, number | null][]).map((r, i) => ({
+  return (j.rows as [string, string, number, number, number, number, number, number | null, number[] | null | undefined][]).map((r, i) => ({
     name: r[0],
     country: r[1],
     lat: r[2],
@@ -85,6 +87,7 @@ export async function loadCities(base: string): Promise<City[]> {
     capital: r[6] === 1,
     rank: i,
     elev: r[7] ?? null,
+    mc: r[8] ?? null,
   }));
 }
 
