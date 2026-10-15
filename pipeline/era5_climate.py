@@ -121,6 +121,8 @@ def main():
                     help="monthly 0.25 deg precipitation, snowfall and snow depth normals for the same sample days (hires_normals.npz)")
     ap.add_argument("--only-extra", action="store_true",
                     help="compute only daytime relative humidity and daily snowfall for the same sample days (samples_extra.npz)")
+    ap.add_argument("--only-full", action="store_true",
+                    help="precipitation, snowfall and snow depth over every day of the period (full_normals.npz)")
     args = ap.parse_args()
 
     y0, y1 = (int(x) for x in args.years.split("-"))
@@ -168,6 +170,8 @@ def main():
         return extra(args, years, L, cz, coarse, lat_c, lon_c, offs)
     if args.only_hires:
         return hires(args, years, L)
+    if args.only_full:
+        return full_period(args, years, coarse)
 
     # ---- blocks ----------------------------------------------------------
     nblocks = (365 + L - 1) // L
@@ -563,6 +567,76 @@ def hires(args, years, L):
     np.savez(os.path.join(args.work, "hires_normals.npz"), days=n, **out)
     print("wrote hires_normals.npz")
 
+
+
+FULL_VARS = ("precip", "snowfall", "snow")
+MONTH_START_365 = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365]
+
+
+def full_period(args, years, coarse):
+    """Precipitation and snow over every day of the period, not just the sample.
+
+    The sample holds one real day per calendar date, which is plenty for
+    temperatures but not for rare heavy events: a single sampled blizzard can
+    double a city's yearly snowfall. This pass reads every day of the period:
+    precipitation and snowfall from four hourly accumulations 6 hours apart
+    (times 6; the hours rotate from day to day so that all 24 are covered) and
+    snow depth at 12 UTC. It writes full_normals.npz: monthly means at 0.25 deg
+    (precip mm/day, snowfall cm/day at 10:1, snow depth cm; the same form as
+    hires_normals.npz) and at the sample's grid, plus every day's snow depth on
+    the sample's grid (full_snow.f16) for matching the sample's snow cover.
+    encode_climate.py rescales the sample to these."""
+    days = [dt.date(years[0], 1, 1) + dt.timedelta(days=k) for k in range((dt.date(years[-1], 12, 31) - dt.date(years[0], 1, 1)).days + 1)]
+    nd = len(days)
+    probe = coarse(np.zeros((NLAT, NLON), np.float32))
+    R, C = probe.shape
+    snow_path = os.path.join(args.work, "full_snow.f16")
+    snow1 = np.lib.format.open_memmap(snow_path, mode="r+" if os.path.exists(snow_path) else "w+", dtype=np.float16, shape=(nd, R, C))
+    ckpt = os.path.join(args.work, "full_ckpt.npz")
+    if os.path.exists(ckpt):
+        c = np.load(ckpt)
+        acc = {v: c[v].astype(np.float64) for v in FULL_VARS}
+        n, done = c["n"].astype(np.float64), int(c["done"])
+    else:
+        acc = {v: np.zeros((12, NLAT, NLON), np.float64) for v in FULL_VARS}
+        n, done = np.zeros(12), 0
+    pool = ThreadPoolExecutor(args.threads)
+    t_start = time.time()
+    BATCH = 12
+    for b0 in range(done, nd, BATCH):
+        ks = range(b0, min(nd, b0 + BATCH))
+        keys = []
+        for k in ks:
+            h0 = hidx(dt.datetime(days[k].year, days[k].month, days[k].day))
+            keys += [(v, h0 + 1 + (k % 6) + 6 * j) for v in ("total_precipitation", "snowfall") for j in range(4)]
+            keys += [(v, h0 + 12) for v in ("snow_depth", "snow_density")]
+        got = dict(pool.map(lambda key: (key, np.nan_to_num(fetch(key[0], key[1]), nan=0.0)), keys))
+        for k in ks:
+            h0 = hidx(dt.datetime(days[k].year, days[k].month, days[k].day))
+            hrs = [h0 + 1 + (k % 6) + 6 * j for j in range(4)]
+            pr = 6 * sum(np.maximum(got[("total_precipitation", h)], 0) for h in hrs) * 1000.0
+            sf = 6 * sum(np.maximum(got[("snowfall", h)], 0) for h in hrs) * 1000.0
+            sd, rho = got[("snow_depth", h0 + 12)], got[("snow_density", h0 + 12)]
+            sn = np.where(sd > 1e-5, sd * 1000.0 / np.maximum(rho, 50.0), 0) * 100
+            m = days[k].month - 1
+            for v, a in zip(FULL_VARS, (pr, sf, sn)):
+                acc[v][m] += a
+            n[m] += 1
+            snow1[k] = coarse(sn.astype(np.float32))
+        done = ks[-1] + 1
+        if days[ks[-1]].month == 12 and days[ks[-1]].day >= 20 or done == nd:  # checkpoint about once a year
+            snow1.flush()
+            np.savez(ckpt + ".tmp.npz", n=n, done=done, **{v: acc[v] for v in FULL_VARS})
+            os.replace(ckpt + ".tmp.npz", ckpt)
+        if (b0 // BATCH) % 10 == 0:
+            el = time.time() - t_start
+            print(f"full {days[ks[-1]]} {done}/{nd} elapsed={el:.0f}s", flush=True)
+    snow1.flush()
+    mean = {v: (acc[v] / n[:, None, None]).astype(np.float32) for v in FULL_VARS}
+    coarse_mean = {f"{v}1": np.stack([coarse(mean[v][m]) for m in range(12)]) for v in FULL_VARS}
+    months = np.array([d.month - 1 for d in days], np.int8)
+    np.savez(os.path.join(args.work, "full_normals.npz"), days=n, months=months, **mean, **coarse_mean)
+    print("wrote full_normals.npz")
 
 if __name__ == "__main__":
     main()

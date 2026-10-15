@@ -141,6 +141,7 @@ def main():
     aq_path = os.path.join(a.work, "samples_aq.npz")
     if os.path.exists(aq_path):  # gefs_aq.py
         smp["aqi"] = np.load(aq_path)["aqi"]
+    match_full(smp, a.work, st)
     land, elev, lat, lon = st["land"], st["elev"], st["lat"], st["lon"]
     R, C = land.shape
     mask = land > a.min_land
@@ -208,6 +209,71 @@ def main():
 MONTH_NARROW, MONTH_WIDE = 30.4, 45.0
 
 
+def match_full(smp: dict, work: str, st) -> None:
+    """Make the sample's precipitation, snowfall and snow depth agree with every
+    day of the period (full_normals.npz, era5_climate.py --only-full).
+
+    The sample has one real day per calendar date. For rain and snow a few
+    sampled storms can dominate a cell's totals (New York's sample caught the
+    blizzards of Feb 2017, Feb 2021 and Feb 2024: twice its real snowfall).
+    Precipitation and snowfall are rescaled so each cell's monthly means match
+    the full period's, with the factors interpolated between mid-months.
+    Snow depth is quantile-mapped per cell and month onto the full period's
+    daily values, which fixes both the depth and the number of days with snow
+    on the ground. The sample keeps its days, so the conditions that happen
+    together (cold, snowy, sunny...) stay together."""
+    path = os.path.join(work, "full_normals.npz")
+    if not os.path.exists(path):
+        print("no full_normals.npz: precipitation and snow from the sample days alone")
+        return
+    fn = np.load(path)
+    lat, lon = st["lat"], st["lon"]
+    month = np.searchsorted(MONTH_START[1:], np.arange(365), side="right")
+    mids = (np.array(MONTH_START[:12]) + np.array(MONTH_START[1:])) / 2
+    # each day's two nearest mid-months and their weights (wrapping round the year)
+    d = np.arange(365) + 0.5
+    m1 = np.searchsorted(mids, d) % 12
+    m0 = (m1 - 1) % 12
+    span = (mids[m1] - mids[m0]) % 365
+    w1 = ((d - mids[m0]) % 365) / span
+    probe = [("New York", 40.75, -73.98), ("Boston", 42.36, -71.06), ("Chicago", 41.88, -87.63), ("Denver", 39.74, -104.99), ("Fresno", 36.74, -119.79)]
+    cell = [(n, int(np.argmin(abs(lat - la))), int(np.argmin(abs(((lon - lo + 180) % 360) - 180)))) for n, la, lo in probe]
+
+    for key, eps in (("precip", 0.02), ("snowfall", 0.005)):
+        if key not in smp:
+            continue
+        x = smp[key].astype(np.float32)
+        full = fn[f"{key}1"].astype(np.float32)
+        before = {n: np.nansum(x[:, i, j]) for n, i, j in cell}
+        for _ in range(3):  # a few rounds: the interpolated factors shift the monthly means a little
+            samp = np.stack([np.nanmean(x[month == m], 0) for m in range(12)])
+            f = np.where(samp > eps, full / np.maximum(samp, 1e-9), 1.0)
+            f = np.where((samp > eps) & (full < eps), 0.0, np.clip(f, 0, 10)).astype(np.float32)
+            x *= f[m0] * (1 - w1)[:, None, None] + f[m1] * w1[:, None, None]
+        smp[key] = x
+        unit = 25.4 if key == "precip" else 2.54
+        print(f"full-period {key}: " + ", ".join(f"{n} {before[n] / unit:.0f} -> {np.nansum(x[:, i, j]) / unit:.0f} in" for n, i, j in cell))
+
+    if "snow" in smp and os.path.exists(os.path.join(work, "full_snow.f16")):
+        days = np.load(os.path.join(work, "full_snow.f16"), mmap_mode="r")
+        months = fn["months"]
+        x = smp["snow"].astype(np.float32)
+        thr = 2.54
+        before = {n: int((x[:, i, j] >= thr).sum()) for n, i, j in cell}
+        for m in range(12):
+            F = np.asarray(days[months == m], dtype=np.float32)
+            F.sort(axis=0)
+            sel = np.where(month == m)[0]
+            S = x[sel]
+            order = np.argsort(S, axis=0, kind="stable")
+            ranks = np.empty_like(order)
+            np.put_along_axis(ranks, order, np.arange(len(sel))[:, None, None], 0)
+            idx = np.minimum(((ranks + 0.5) / len(sel) * F.shape[0]).astype(np.int64), F.shape[0] - 1)
+            x[sel] = np.where(np.isnan(S), np.nan, np.take_along_axis(F, idx, 0))
+        smp["snow"] = x
+        print("full-period snow cover days (>= 1 in): " + ", ".join(f"{n} {before[n]} -> {int((x[:, i, j] >= thr).sum())}" for n, i, j in cell))
+
+
 def month_weights(m: int, half: float, days: int = 365) -> np.ndarray:
     mid = (MONTH_START[m] + MONTH_START[m + 1]) / 2
     dist = np.abs((np.arange(days) + 0.5 - mid + days / 2) % days - days / 2)
@@ -238,7 +304,9 @@ FACTOR_STEPS = 21  # uint8 code = 128 + 21 * log2(factor); 0 = none
 
 def level_factors(work: str, st, mask: np.ndarray) -> dict | None:
     """{var: (12, LEVELS, ncells) float32} multiplicative factors, or None without hi-res normals."""
-    path = os.path.join(work, "hires_normals.npz")
+    path = os.path.join(work, "full_normals.npz")  # every day of the period (era5_climate.py --only-full)
+    if not os.path.exists(path):
+        path = os.path.join(work, "hires_normals.npz")  # the sample days only
     if not os.path.exists(path):
         print("no hires_normals.npz: precipitation and snow without elevation levels")
         return None
