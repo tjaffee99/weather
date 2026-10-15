@@ -18,6 +18,8 @@ import shapefile  # pyshp
 
 URL = "https://naciscdn.org/naturalearth/10m/cultural/ne_10m_populated_places_simple.zip"
 GEONAMES = "https://download.geonames.org/export/dump/cities15000.zip"
+# names to show instead of the sources' (Natural Earth calls Hebron by its Arabic name)
+RENAME = {"Al Khalil": "Hebron"}
 
 
 def geonames():
@@ -72,7 +74,7 @@ def main():
         if pop < a.min_pop and not cap:
             continue
         el = elevation(d["latitude"], d["longitude"])
-        out.append([d["name"], d["adm0name"], round(d["latitude"], 3), round(d["longitude"], 3), pop,
+        out.append([RENAME.get(d["name"], d["name"]), d["adm0name"], round(d["latitude"], 3), round(d["longitude"], 3), pop,
                     round(float(d["min_zoom"] or 9), 1), 1 if cap else 0, None if el is None else round(el)])
     # towns Natural Earth leaves out; skip the same place (same name within 15 km, or anything within 3 km)
     near = {}

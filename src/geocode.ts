@@ -5,6 +5,7 @@
  * Falls back to the bundled city list when Nominatim is unreachable.
  */
 import { nearestCity, type City } from './data';
+import { regionDetail } from './regions';
 
 export interface Place {
   name: string;
@@ -35,6 +36,11 @@ async function nominatim(lat: number, lon: number, zoom: number, signal: AbortSi
 const localityOf = (a: Record<string, string>) => a.city ?? a.town ?? a.village ?? a.hamlet ?? a.municipality;
 
 export async function reverseGeocode(lon: number, lat: number, cities: City[]): Promise<Place | null> {
+  const [place, region] = await Promise.all([lookup(lon, lat, cities), regionDetail(lon, lat).catch(() => null)]);
+  return place && region ? { ...place, detail: region } : place;
+}
+
+async function lookup(lon: number, lat: number, cities: City[]): Promise<Place | null> {
   const key = `${lat.toFixed(4)},${lon.toFixed(4)}`;
   if (cache.has(key)) return cache.get(key)!;
   ctrl?.abort();

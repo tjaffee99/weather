@@ -119,6 +119,7 @@ Live at **https://weather.theojaffee.net** (`public/CNAME`; DNS: `weather` CNAME
 - Air quality correction: ACAG Surface PM2.5 V6.GL.03 (van Donkelaar et al., Washington University in St. Louis; CC BY 4.0), via the AWS Open Data `satpmdata` bucket
 - Climate: Copernicus Climate Change Service ERA5 reanalysis (Hersbach et al. 2020), via Google's ARCO-ERA5
 - Point forecasts in the location card: Open-Meteo (CC BY 4.0); place names and boundaries: OpenStreetMap Nominatim
+- West Bank and Gaza place names in the cards (`pipeline/build_regions.py`, `src/regions.ts`): OCHA oPt via HDX. Oslo II areas (PA Ministry of Planning) decide the region line: Area C reads "Judea and Samaria Area, Israel"; Areas A and B, including Hebron's H1 and H2 and the Wye nature reserve, read "West Bank, State of Palestine". The Gaza Strip outline comes from the COD-AB boundaries (CC BY-IGO) and reads "Gaza Strip, State of Palestine". East Jerusalem and the 1949 no man's land keep the geocoder's name
 - Basemap: OpenFreeMap / OpenMapTiles / © OpenStreetMap contributors; low-zoom coastlines: Natural Earth
 - Terrain: AWS Terrain Tiles (Mapzen terrarium)
 - Cities: Natural Earth (public domain); towns and city elevations: GeoNames (CC BY 4.0)
