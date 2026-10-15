@@ -1,14 +1,14 @@
 /**
  * Location cards for the live layers. Each is a box about one thing: the value
- * now, what it will do over the next day in plain words, a 24-hour chart and
- * the next few days. Temperature is the main card (the full forecast: also
+ * now, a 24-hour chart and the next few days (layers other than temperature
+ * add a line of advice or timing). Temperature is the main card (the full forecast: also
  * wind, humidity, rain, UV and air at a glance); every other layer's card has
  * the full forecast one tap away.
  */
 import { h } from '../ui/dom';
 import { AQI, CLOUD, HUMIDITY, PRECIP, SNOWFALL, TEMPERATURE, UV_INDEX, WIND, colorAt, type Palette } from '../map/palettes';
 import { fmt, toDisplay, units } from '../units';
-import { condition, type Hour, type PointForecast } from './pointForecast';
+import { condition, sunTimes, type Hour, type PointForecast } from './pointForecast';
 
 export type CardKind = 'temp' | 'precip' | 'cloud' | 'uv' | 'aqi' | 'snow' | 'wind' | 'humidity';
 
@@ -193,24 +193,6 @@ function dayIcon(hs: Hour[]): string {
 
 // ---------- the cards ----------
 
-/** The next day's temperatures in words: where it goes and when, plus rain or snow if likely. */
-function tempSay(next: Hour[], tz: string | undefined, feels: boolean): string {
-  const v = (x: Hour) => (feels ? x.feels ?? x.temp : x.temp);
-  if (next.length < 2) return '';
-  const hi = next.reduce((a, b) => (v(b) > v(a) ? b : a)), lo = next.reduce((a, b) => (v(b) < v(a) ? b : a));
-  const deg = (x: Hour) => fmt('temp', v(x));
-  let say: string;
-  if (toDisplay('temp', v(hi)) - toDisplay('temp', v(lo)) < 3) say = `Steady around ${deg(next[0])} for the next day.`;
-  else if (hi === next[0]) say = `Cooling to ${deg(lo)} by ${hourName(lo.t, tz)}.`;
-  else if (lo === next[0]) say = `Warming to ${deg(hi)} by ${hourName(hi.t, tz)}.`;
-  else if (hi.t < lo.t) say = `Up to ${deg(hi)} around ${hourName(hi.t, tz)}, then down to ${deg(lo)} by ${hourName(lo.t, tz)}.`;
-  else say = `Down to ${deg(lo)} around ${hourName(lo.t, tz)}, then up to ${deg(hi)} by ${hourName(hi.t, tz)}.`;
-  const wet = next.find((x, i) => i > 0 && ((x.precip ?? 0) >= 0.2 || (x.pop ?? 0) >= 50));
-  if (wet && !((next[0].precip ?? 0) >= 0.2)) say += ` ${[71, 73, 75, 77, 85, 86].includes(wet.code) ? 'Snow' : 'Rain'} likely from about ${hourName(wet.t, tz)}.`;
-  else if ((next[0].precip ?? 0) >= 0.2) say += ` ${condition(next[0].code, next[0].isDay).label} now.`;
-  return say;
-}
-
 /** 24-hour temperature curve, coloured by temperature, with the weather every 3 hours above it. */
 function tempCurve(next: Hour[], tz: string | undefined, feels: boolean): HTMLElement {
   const W = 340, H = 112, top = 30, bottom = 16;
@@ -223,7 +205,7 @@ function tempCurve(next: Hour[], tz: string | undefined, feels: boolean): HTMLEl
   const y = (t: number) => top + 10 + (1 - (t - (lo - pad)) / (hi + pad - (lo - pad) || 1)) * (H - top - bottom - 14);
   const step = n > 12 ? 3 : 1; // hourly data: label every 3 hours
   // the value labels of the windows holding the high and the low move onto them, so the
-  // numbers in the sentence above are on the chart
+  // day's extremes are always on the chart
   const at = next.map((_, i) => i);
   for (const e of [vs.indexOf(hi), vs.indexOf(lo)]) {
     let m = Math.round(e / step) * step;
@@ -341,7 +323,6 @@ function tempCard({ fc, at, feels, now }: CardContext): Node[] {
   const hoursOf = (d: { t: number }) => fc.hours.filter((x) => x.t >= d.t && x.t < d.t + 24 * HOUR); // t: local midnight
   return [
     head,
-    sentence(tempSay(next, tz, !!feels)),
     tempCurve(next, tz, !!feels),
     facts(
       ['Wind', num(cur.wind) ? fmt('speed', cur.wind) : '—', num(cur.gust) ? `gusts ${fmt('speed', cur.gust, false)}` : num(cur.wind) ? windShort(cur.wind) : undefined, num(cur.wind) ? colorAt(WIND, cur.wind) : undefined],
@@ -569,6 +550,31 @@ function humidityCard({ fc, at }: CardContext): Node[] {
     bars(next.map((x, i) => ({ t: x.t, v: x.humidity ?? 0, color: colorAt(HUMIDITY, x.humidity ?? 0), label: num(x.humidity) ? `${Math.round(x.humidity)}` : undefined, mark: i === 0 })), { tz, max: 100, every: 3 }),
     h('div', { class: 'lc-legend' }, 'Relative humidity each hour (%). How sticky it feels depends on the dew point: under 10° dry, 16° humid, 20°+ muggy.'),
   ];
+}
+
+/**
+ * The place's local time (kept ticking while shown) and today's sunrise and
+ * sunset. Without a time zone (the GFS fallback) the time is the nearest
+ * whole-hour offset from the longitude.
+ */
+export function placeClock(lon: number, lat: number, tz?: string): HTMLElement {
+  const off = Math.round(lon / 15);
+  const zone = tz ?? (off === 0 ? 'Etc/GMT' : `Etc/GMT${off > 0 ? '-' : '+'}${Math.abs(off)}`);
+  const clock = (t: number) => fmtLocal(t, zone, { hour: 'numeric', minute: '2-digit' });
+  const time = h('b', {});
+  const sun = h('span', {});
+  const el = h('div', { class: 'clock' }, h('span', {}, time, ' local time'), sun);
+  const paint = () => {
+    const now = Date.now();
+    time.textContent = clock(now);
+    const s = sunTimes(lon, lat, now);
+    sun.replaceChildren(
+      ...(s === 'day' ? [h('span', {}, 'Sun up all day')] : s === 'night' ? [h('span', {}, 'Sun down all day')] : [h('span', {}, `Sunrise ${clock(s.rise)}`), h('span', {}, `Sunset ${clock(s.set)}`)]),
+    );
+  };
+  paint();
+  const timer = window.setInterval(() => (el.isConnected ? paint() : clearInterval(timer)), 15_000);
+  return el;
 }
 
 export function layerCard(kind: CardKind, ctx: CardContext): Node[] {

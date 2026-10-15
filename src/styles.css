@@ -989,6 +989,29 @@ button {
   font-size: 11.5px;
   margin-top: 2px;
 }
+/* live cards: local time, sunrise and sunset (live/layerCard.ts placeClock) */
+.card .clock {
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: 12px;
+  row-gap: 2px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.card .clock > span,
+.card .clock > span > span {
+  white-space: nowrap;
+}
+.card .clock > span:last-child {
+  display: flex;
+  column-gap: 12px;
+}
+.card .clock b {
+  color: var(--text);
+  font-weight: 600;
+}
 .card .big {
   font-size: 54px;
   font-weight: 250;

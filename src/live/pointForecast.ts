@@ -172,3 +172,26 @@ export function isDaytime(lon: number, lat: number, t: number): boolean {
   const sinEl = Math.sin(phi) * Math.sin(decl) + Math.cos(phi) * Math.cos(decl) * Math.cos(ha);
   return Math.asin(sinEl) > (-0.83 * Math.PI) / 180;
 }
+
+/**
+ * Sunrise and sunset (ms) on the local solar day containing time t, when the
+ * sun's upper limb crosses the horizon with standard refraction (-0.833°);
+ * 'day' or 'night' when it doesn't rise or set. NOAA's low-precision solar
+ * formulas: within a few minutes.
+ */
+export function sunTimes(lon: number, lat: number, t: number): { rise: number; set: number } | 'day' | 'night' {
+  const local = new Date(t + (lon / 15) * HOUR);
+  const noon0 = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), 12) - (lon / 15) * HOUR;
+  const doy = (noon0 - Date.UTC(local.getUTCFullYear(), 0, 1)) / 86400_000;
+  const g = (2 * Math.PI / 365) * doy;
+  const eqt = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const decl = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g) - 0.002697 * Math.cos(3 * g) + 0.00148 * Math.sin(3 * g);
+  const phi = (lat * Math.PI) / 180;
+  const cosH = (Math.sin((-0.833 * Math.PI) / 180) - Math.sin(phi) * Math.sin(decl)) / (Math.cos(phi) * Math.cos(decl));
+  if (cosH > 1) return 'night';
+  if (cosH < -1) return 'day';
+  const noon = noon0 - eqt * 60_000;
+  const half = ((Math.acos(cosH) * 180) / Math.PI / 15) * HOUR;
+  return { rise: noon - half, set: noon + half };
+}
+

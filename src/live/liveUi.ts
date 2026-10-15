@@ -7,7 +7,7 @@ import { coordLabel, timeLabel } from '../ui/format';
 import { GLACIER } from '../map/palettes';
 import { anchorForecast, openMeteo, type PointForecast } from './pointForecast';
 import { pm25FromAqi } from './aerosol';
-import { CARD_TITLES, layerCard, type CardKind } from './layerCard';
+import { CARD_TITLES, layerCard, placeClock, type CardKind } from './layerCard';
 import { pointElevation } from '../map/localDem';
 import { demAt, type Dem } from '../data';
 import type { Place } from '../geocode';
@@ -336,8 +336,9 @@ export class LiveUI {
     const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => ((this.card = undefined), this.onCardClose()) }, '✕');
     const title = h('div', { class: 'place' }, '…');
     const sub = h('div', { class: 'coords' }, coordLabel(lon, lat));
+    const clock = h('div', {});
     const body = h('div', { class: 'card-body' }, h('div', { class: 'desc' }, 'Loading forecast…'));
-    card.append(close, title, sub, body);
+    card.append(close, title, sub, clock, body);
     this.card = { lon, lat, at, title, sub, body, full: false };
     this.refreshCard();
 
@@ -374,6 +375,7 @@ export class LiveUI {
     const now = await nowP;
     if (token !== this.cardToken || !this.card) return;
     this.card.now = now ?? undefined;
+    clock.replaceWith(placeClock(lon, lat, fc.timezone));
     this.card.fc = now && fc.source === 'Open-Meteo' ? anchorForecast(fc, at, now) : fc;
     const elev = await elevP;
     if (elev !== null && token === this.cardToken) sub.textContent += ` · ${Math.round(elev)} m`;
