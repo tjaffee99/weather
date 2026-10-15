@@ -2,6 +2,7 @@
 import { fetchField, NO_SEA, type Cycle, type LiveVar } from './gfs';
 import { hrrrSnow, type ConicGrid, type HrrrDomain } from './hrrr';
 import { aqiField } from './aerosol';
+import { apparentTemp } from './feels';
 
 export interface LiveRequest {
   id: number;
@@ -56,11 +57,7 @@ self.onmessage = async (e: MessageEvent<LiveRequest>) => {
         // Steadman apparent temperature (shade): T + 0.33 e - 0.70 wind - 4 (e in hPa, wind in m/s),
         // the same feels-like as the climate finder's
         const td = fields[1].values, uu = fields[2].values, vw = fields[3].values;
-        for (let i = 0; i < n; i++) {
-          const t = src[i] - 273.15, d = Math.min(td[i] - 273.15, t);
-          const e = 6.105 * Math.exp((17.27 * d) / (237.7 + d));
-          out[i] = t + 0.33 * e - 0.7 * Math.hypot(uu[i], vw[i]) - 4.0;
-        }
+        for (let i = 0; i < n; i++) out[i] = apparentTemp(src[i] - 273.15, td[i] - 273.15, Math.hypot(uu[i], vw[i]));
         break;
       }
       case 'sst':

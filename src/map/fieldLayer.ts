@@ -54,6 +54,8 @@ uniform sampler2D u_reg0;       // live: high-resolution regional fields on coni
 uniform sampler2D u_reg1;
 uniform vec4 u_rcone[2];        // n, k (m), central meridian (deg), weight (0: off)
 uniform vec4 u_rgrid[2];        // first grid point x, y and spacing dx, dy (m)
+uniform sampler2D u_corr;       // live: additive correction on a lon/lat grid (live/pointLabels.ts)
+uniform vec4 u_corrExt;         // its extent: west lon, north lat, width, height (deg); width 0 = none
 
 uniform vec4 u_grid;           // lon0, lat0, dx, dy
 uniform vec2 u_gridSize;
@@ -245,6 +247,10 @@ void main() {
     }
     v = regional(v, u_reg0, u_rcone[0], u_rgrid[0], lon, lat);
     v = regional(v, u_reg1, u_rcone[1], u_rgrid[1], lon, lat);
+    if (u_corrExt.z > 0.0) {
+      vec2 cu = vec2(mod(lon - u_corrExt.x, 360.0) / u_corrExt.z, (u_corrExt.y - lat) / u_corrExt.w);
+      if (cu.x <= 1.0 && cu.y >= 0.0 && cu.y <= 1.0) v += texture(u_corr, cu).r;
+    }
     float altMix = u_useAlt > 0.0 ? smoothstep(0.25, 0.75, bicubic(u_alt, uv).r) : 0.0;
     col = shade(v, altMix);
   } else if (u_mode == 2) {
@@ -341,7 +347,7 @@ const UNIFORMS = [
   'u_grid', 'u_gridSize', 'u_cgrid', 'u_cgridSize', 'u_levels', 'u_mix', 'u_domain', 'u_log',
   'u_lapse', 'u_snowH', 'u_useAlt', 'u_opacity', 'u_cut', 'u_csqrt', 'u_under', 'u_waterMask', 'u_ldem', 'u_ldemExt',
   'u_micro', 'u_microExt', 'u_microScale', 'u_microVar', 'u_microW', 'u_microSeasonW', 'u_groups',
-  'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy', 'u_reg0', 'u_reg1', 'u_rcone', 'u_rgrid',
+  'u_mfields', 'u_mcount', 'u_mrange', 'u_mdoy', 'u_reg0', 'u_reg1', 'u_rcone', 'u_rgrid', 'u_corr', 'u_corrExt',
 ];
 
 export class FieldLayer implements CustomLayerInterface {
@@ -400,6 +406,7 @@ export class FieldLayer implements CustomLayerInterface {
   private mdoy = 0;
   private ldemExt: [number, number, number, number] = [0, 0, 0, 0];
   private reg: (ConicGrid | null)[] = [null, null];
+  private corrExt: [number, number, number, number] = [0, 0, 0, 0];
 
   constructor(id: string) {
     this.id = id;
@@ -438,7 +445,7 @@ export class FieldLayer implements CustomLayerInterface {
     gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.ibo);
     gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, idx, gl.STATIC_DRAW);
     // 1x1 placeholders so every sampler is always bound to a complete texture
-    for (const name of ['fieldA', 'fieldB', 'alt', 'orog', 'cellElev']) this.tex[name] = this.makeTex2D(1, 1, new Float32Array([0, 0]), 2);
+    for (const name of ['fieldA', 'fieldB', 'alt', 'orog', 'cellElev', 'corr']) this.tex[name] = this.makeTex2D(1, 1, new Float32Array([0, 0]), 2);
     this.tex.dem = this.makeR8(1, 1, new Uint8Array([0]));
     this.tex.result = this.makeArray(1, 1, 1, new Float32Array([0, 0]));
     this.tex.ldem = this.makeTex2D(1, 1, new Float32Array([0]), 1);
@@ -562,6 +569,17 @@ export class FieldLayer implements CustomLayerInterface {
       this.setParams(gl.TEXTURE_2D, gl.CLAMP_TO_EDGE);
     }
     this.reg[slot] = r ? r.grid : null;
+    this.repaint();
+  }
+
+  /** Live: an additive correction (w x h, rows from the north) over extent [west, north, width, height], or null. */
+  setCorrection(c: { w: number; h: number; values: Float32Array; extent: [number, number, number, number] } | null) {
+    if (c) {
+      const gl = this.gl!;
+      this.tex.corr = this.makeTex2D(c.w, c.h, c.values, 1, this.tex.corr);
+      this.setParams(gl.TEXTURE_2D, gl.CLAMP_TO_EDGE);
+    }
+    this.corrExt = c ? c.extent : [0, 0, 0, 0];
     this.repaint();
   }
 
@@ -732,6 +750,8 @@ export class FieldLayer implements CustomLayerInterface {
     }
     bind(12, 'under', gl.TEXTURE_2D, 'u_under');
     bind(13, 'micro', gl.TEXTURE_2D_ARRAY, 'u_micro');
+    bind(14, 'corr', gl.TEXTURE_2D, 'u_corr');
+    gl.uniform4f(p.u.u_corrExt, ...(this.mode === 0 ? this.corrExt : ([0, 0, 0, 0] as [number, number, number, number])));
     gl.uniform4f(p.u.u_microExt, ...this.microExt);
     gl.uniform1f(p.u.u_microScale, this.microScale);
     gl.uniform1i(p.u.u_microVar, this.mode === 1 ? this.microVar : 0);

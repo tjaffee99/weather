@@ -790,10 +790,10 @@ export class ClimateUI {
     const visible = labelFilter(this.map);
     src.setData({
       type: 'FeatureCollection',
-      features: this.cities.map((c) => ({
+      features: this.cities.map((c, i) => ({
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
-        properties: { name: c.name, label: visible(c) ? this.cityLabel(c) : '', rank: c.rank, minzoom: c.minzoom },
+        properties: { i, name: c.name, label: visible(c) ? this.cityLabel(c) : '', rank: c.rank, minzoom: c.minzoom },
       })),
     });
   }

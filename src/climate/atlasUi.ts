@@ -663,7 +663,7 @@ export class AtlasUI {
     if (k !== 'year') this.renderLegendWhen();
     src.setData({
       type: 'FeatureCollection',
-      features: this.cities.map((c) => {
+      features: this.cities.map((c, i) => {
         const ok = visible(c) && (!f.flags || this.nearSea(f, c.lon, c.lat));
         // microclimate offsets only while the map shows them (zoomed in), so labels match the colours
         const off = this.micro?.shown ? this.microFor(def, cityCoefs(c.mc, this.micro.scale), this.period) : 0;
@@ -671,7 +671,7 @@ export class AtlasUI {
         return {
           type: 'Feature' as const,
           geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
-          properties: { name: c.name, label: Number.isFinite(v) ? def.fmt(v, k) : '', rank: c.rank, minzoom: c.minzoom },
+          properties: { i, name: c.name, label: Number.isFinite(v) ? def.fmt(v, k) : '', rank: c.rank, minzoom: c.minzoom },
         };
       }),
     });

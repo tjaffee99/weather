@@ -1,8 +1,10 @@
 /**
  * Point forecast for the location card, from the free Open-Meteo API (best
  * available high-resolution model for the location, elevation-corrected, with
- * WMO weather codes for conditions). The map itself stays on NOAA GFS.
+ * WMO weather codes for conditions). The map's field is NOAA GFS; its city
+ * labels use this same forecast (pointLabels.ts).
  */
+import { apparentTemp } from './feels';
 
 export interface Hour {
   t: number; // UTC ms
@@ -27,14 +29,15 @@ export interface PointForecast {
   source: 'Open-Meteo' | 'NOAA GFS';
   timezone?: string;
   hours: Hour[];
-  daily: { t: number; max: number; min: number; sun?: number; uv?: number; precip?: number; pop?: number; snowfall?: number }[];
+  /** t: local midnight. max/min (and the feels-like fmax/fmin) from the hours where they cover the day */
+  daily: { t: number; max: number; min: number; fmax?: number; fmin?: number; sun?: number; uv?: number; precip?: number; pop?: number; snowfall?: number }[];
   /** current air quality, when available */
   air?: { aqi: number; pm25: number };
 }
 
 export async function openMeteo(lat: number, lon: number, signal?: AbortSignal): Promise<PointForecast> {
   const hourly = [
-    'temperature_2m', 'apparent_temperature', 'relative_humidity_2m', 'weather_code', 'precipitation_probability',
+    'temperature_2m', 'relative_humidity_2m', 'weather_code', 'precipitation_probability',
     'precipitation', 'cloud_cover', 'wind_speed_10m', 'wind_gusts_10m', 'is_day',
     'wind_direction_10m', 'uv_index', 'dew_point_2m', 'snowfall', 'snow_depth',
   ];
@@ -50,7 +53,8 @@ export async function openMeteo(lat: number, lon: number, signal?: AbortSignal):
   const hours: Hour[] = (h.time as number[]).map((t, i) => ({
     t: t * 1000,
     temp: h.temperature_2m[i],
-    feels: h.apparent_temperature?.[i],
+    // the app's own feels-like (Open-Meteo's apparent_temperature also adds sunshine)
+    feels: h.dew_point_2m?.[i] != null && h.wind_speed_10m?.[i] != null ? apparentTemp(h.temperature_2m[i], h.dew_point_2m[i], h.wind_speed_10m[i] / 3.6) : undefined,
     code: h.weather_code?.[i] ?? 0,
     isDay: h.is_day?.[i] === 1,
     pop: h.precipitation_probability?.[i] ?? undefined,
@@ -71,6 +75,7 @@ export async function openMeteo(lat: number, lon: number, signal?: AbortSignal):
       t: t * 1000,
       max: d.temperature_2m_max[i],
       min: d.temperature_2m_min[i],
+      ...dayRange(hours, t * 1000),
       sun: d.sunshine_duration?.[i] != null ? d.sunshine_duration[i] / 3600 : undefined,
       uv: d.uv_index_max?.[i] ?? undefined,
       precip: d.precipitation_sum?.[i] ?? undefined,
@@ -78,6 +83,17 @@ export async function openMeteo(lat: number, lon: number, signal?: AbortSignal):
       snowfall: d.snowfall_sum?.[i] ?? undefined,
     })) ?? [];
   return { source: 'Open-Meteo', timezone: j.timezone, hours, daily: days };
+}
+
+/**
+ * High and low (actual and feels-like) of the local day starting at t, from the
+ * same hours as the card's chart and sentence, when they cover the day.
+ */
+function dayRange(hours: Hour[], t: number): { max?: number; min?: number; fmax?: number; fmin?: number } {
+  const hs = hours.filter((x) => x.t >= t && x.t < t + 86400_000);
+  if (hs.length < 20) return {};
+  const ts = hs.map((x) => x.temp), fs = hs.filter((x) => x.feels != null).map((x) => x.feels!);
+  return { max: Math.max(...ts), min: Math.min(...ts), ...(fs.length >= 20 ? { fmax: Math.max(...fs), fmin: Math.min(...fs) } : {}) };
 }
 
 export interface Condition {

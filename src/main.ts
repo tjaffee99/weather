@@ -110,6 +110,9 @@ function cityLayer() {
       'text-font': ['Noto Sans Regular'],
       'text-size': ['interpolate', ['linear'], ['zoom'], 1, 11, 5, 13, 9, 15],
       'text-line-height': 1.05,
+      // just below the place, so the marker of an opened city sits above its number
+      'text-anchor': 'top',
+      'text-offset': [0, 0.85],
       'text-padding': 6,
       'text-max-width': 8,
     },
@@ -265,7 +268,13 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeCard();
 });
 
-map.on('click', (e) => openAt(e.lngLat.lng, e.lngLat.lat));
+map.on('click', (e) => {
+  // a tap on a city's label opens that city (its label and card then show the same forecast)
+  const hit = map.getLayer('city-labels') ? map.queryRenderedFeatures(e.point, { layers: ['city-labels'] })[0] : undefined;
+  const c = typeof hit?.properties?.i === 'number' ? cities[hit.properties.i] : undefined;
+  if (c) openAt(c.lon, c.lat);
+  else openAt(e.lngLat.lng, e.lngLat.lat);
+});
 // value labels are only computed for cities on screen: refresh them after each move
 map.on('moveend', () => {
   if (mode === 'climate') climateUi?.updateCities();

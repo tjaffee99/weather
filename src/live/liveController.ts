@@ -15,6 +15,7 @@ import type { WindParticles } from '../map/windParticles';
 import { AQI, CLOUD, HUMIDITY, PRECIP, SNOWFALL, SNOW_DEPTH, TEMPERATURE, UV_INDEX, WIND, type Palette } from '../map/palettes';
 import { demAt, type City, type Dem } from '../data';
 import { codeFromFields, isDaytime, type Hour, type PointForecast } from './pointForecast';
+import { PointLabels, correctionField, type Nudge } from './pointLabels';
 import { fmt, type Quantity } from '../units';
 
 const HOUR = 3600_000;
@@ -104,6 +105,15 @@ export class LiveController {
   /** HRRR field currently wanted per domain ('' = none) */
   private regKey = ['', ''];
   private cityTimer = 0;
+  /** city temperatures from the point forecast (same as the cards) */
+  private points = new PointLabels();
+  /** cities whose labels are on screen: they get forecasts, and the field is nudged to them */
+  private placed: City[] = [];
+  private placedKey = '';
+  private corrOn = false;
+  /** when the labels last changed (until their placement is known), and the last look */
+  private placeDirty = 0;
+  private placeLook = 0;
   active = false;
   onStatus: (msg: string, busy: boolean) => void = () => {};
   onTimeRange: () => void = () => {};
@@ -118,6 +128,9 @@ export class LiveController {
     private cities: City[],
   ) {
     this.obs = new ObservedLayers(map, WEATHER_BEFORE);
+    this.points.onData = () => this.updateCities();
+    map.on('render', () => this.placeDirty && performance.now() - this.placeLook > 300 && this.notePlaced());
+    map.on('idle', () => this.notePlaced());
   }
 
   async init() {
@@ -247,6 +260,7 @@ export class LiveController {
         if (swap) {
           await this.field.fadeTo(0, 140);
           if (token !== this.loadToken || !this.active) return;
+          this.setCorrection(null); // recomputed for the new layer with the labels
           this.applyPalette();
           this.onSwap();
         }
@@ -377,21 +391,88 @@ export class LiveController {
     }, 120);
   }
 
+  private showsTemp() {
+    return this.layer.id === 'temp' || this.layer.id === 'feels';
+  }
+
+  /** A city's label value: the point forecast when loaded, else the map's own field. */
+  private cityValue(c: City): number {
+    const v = this.points.value(c, this.time, this.layer.id === 'feels');
+    return Number.isFinite(v) ? v : this.sample(c.lon, c.lat, undefined, undefined, undefined, undefined, c.elev ?? undefined);
+  }
+
   updateCities() {
     if (!this.active) return;
     const src = this.map.getSource('cities') as GeoJSONSource | undefined;
     if (!src) return;
-    const show = this.layer.id === 'temp' || this.layer.id === 'feels';
+    const show = this.showsTemp();
     const visible = labelFilter(this.map);
-    const features = this.cities.map((c) => {
-      const v = show && visible(c) ? this.sample(c.lon, c.lat, undefined, undefined, undefined, undefined, c.elev ?? undefined) : NaN;
+    const features = this.cities.map((c, i) => {
+      const v = show && visible(c) ? this.cityValue(c) : NaN;
       return {
         type: 'Feature' as const,
         geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
-        properties: { name: c.name, label: Number.isFinite(v) ? fmt('temp', v) : '', rank: c.rank, minzoom: c.minzoom },
+        properties: { i, name: c.name, label: Number.isFinite(v) ? fmt('temp', v) : '', rank: c.rank, minzoom: c.minzoom },
       };
     });
     src.setData({ type: 'FeatureCollection', features });
+    if (show) this.points.want(this.placed);
+    this.updateCorrection();
+    // labels are placed some frames later ('idle' can lag far behind while map tiles load)
+    this.placeDirty = performance.now();
+  }
+
+  /** After the labels are placed: which cities show, so they get forecasts. */
+  private notePlaced() {
+    this.placeLook = performance.now();
+    if (!this.active || !this.showsTemp() || !this.map.getLayer('city-labels')) return void (this.placeDirty = 0);
+    if (!this.map.isSourceLoaded('cities')) return;
+    const idx = new Set<number>();
+    for (const f of this.map.queryRenderedFeatures({ layers: ['city-labels'] })) {
+      const i = f.properties?.i;
+      if (typeof i === 'number' && f.properties?.label) idx.add(i);
+    }
+    // not placed yet (or truly none on screen: stop looking after a while)
+    if (!idx.size && performance.now() - this.placeDirty < 10_000) return;
+    this.placeDirty = 0;
+    const sorted = [...idx].sort((a, b) => a - b);
+    const key = sorted.join(',');
+    if (key === this.placedKey) return;
+    this.placedKey = key;
+    this.placed = sorted.map((i) => this.cities[i]);
+    this.points.want(this.placed);
+    this.updateCorrection();
+  }
+
+  private setCorrection(c: Parameters<FieldLayer['setCorrection']>[0]) {
+    if (!c && !this.corrOn) return;
+    this.corrOn = !!c;
+    this.field.setCorrection(c);
+  }
+
+  /**
+   * Nudge the field toward the labelled cities' point forecasts, so the colours
+   * around a label match its number. Fades out over about 90 px from them.
+   */
+  private updateCorrection() {
+    const z = this.map.getZoom();
+    if (!this.active || !this.showsTemp() || z < 3) return this.setCorrection(null);
+    const feels = this.layer.id === 'feels';
+    const pts: Nudge[] = [];
+    for (const c of this.placed) {
+      const v = this.points.value(c, this.time, feels);
+      const m = this.sample(c.lon, c.lat, undefined, undefined, undefined, undefined, c.elev ?? undefined);
+      if (Number.isFinite(v) && Number.isFinite(m)) pts.push({ lon: c.lon, lat: c.lat, r: v - m });
+    }
+    const b = this.map.getBounds();
+    const w = b.getEast() - b.getWest(), north = Math.min(85, b.getNorth() + (b.getNorth() - b.getSouth()) * 0.25);
+    const south = Math.max(-85, b.getSouth() - (b.getNorth() - b.getSouth()) * 0.25);
+    if (!pts.length || w * 1.5 > 120 || north <= south) return this.setCorrection(null);
+    const extent: [number, number, number, number] = [b.getWest() - w * 0.25, north, w * 1.5, north - south];
+    const lat0 = (north + south) / 2;
+    const kmPerPx = (40075.017 * Math.cos((lat0 * Math.PI) / 180)) / (512 * 2 ** z);
+    const W = 192, H = 192;
+    this.setCorrection({ w: W, h: H, values: correctionField(pts, extent, 45 * kmPerPx, W, H), extent });
   }
 }
 

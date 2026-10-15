@@ -220,6 +220,14 @@ function tempCurve(next: Hour[], tz: string | undefined, feels: boolean): HTMLEl
   const x = (i: number) => (W * (i + 0.5)) / n;
   const y = (t: number) => top + 10 + (1 - (t - (lo - pad)) / (hi + pad - (lo - pad) || 1)) * (H - top - bottom - 14);
   const step = n > 12 ? 3 : 1; // hourly data: label every 3 hours
+  // the value labels of the windows holding the high and the low move onto them, so the
+  // numbers in the sentence above are on the chart
+  const at = next.map((_, i) => i);
+  for (const e of [vs.indexOf(hi), vs.indexOf(lo)]) {
+    let m = Math.round(e / step) * step;
+    if (m >= n) m -= step;
+    if (m > 0 && e !== m) at[m] = e;
+  }
   const ns = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(ns, 'svg');
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
@@ -256,19 +264,20 @@ function tempCurve(next: Hour[], tz: string | undefined, feels: boolean): HTMLEl
   svg.append(path);
   next.forEach((hr, i) => {
     if (i % step) return;
+    const j = at[i];
     const c = document.createElementNS(ns, 'circle');
-    c.setAttribute('cx', String(x(i)));
-    c.setAttribute('cy', String(y(vs[i])));
+    c.setAttribute('cx', String(x(j)));
+    c.setAttribute('cy', String(y(vs[j])));
     c.setAttribute('r', i === 0 ? '3.6' : '2.4');
-    c.setAttribute('fill', colorAt(TEMPERATURE, feels ? hr.feels ?? hr.temp : hr.temp));
+    c.setAttribute('fill', colorAt(TEMPERATURE, feels ? next[j].feels ?? next[j].temp : next[j].temp));
     c.setAttribute('stroke', '#fff');
     c.setAttribute('stroke-width', '1.2');
     const val = document.createElementNS(ns, 'text');
-    val.setAttribute('x', String(x(i)));
-    val.setAttribute('y', String(y(vs[i]) - 7));
+    val.setAttribute('x', String(x(j)));
+    val.setAttribute('y', String(y(vs[j]) - 7));
     val.setAttribute('text-anchor', 'middle');
     val.setAttribute('class', 'lc-val');
-    val.textContent = `${Math.round(vs[i])}°`;
+    val.textContent = `${Math.round(vs[j])}°`;
     // the weather in this 3-hour window (its most significant hour), with rain chance
     const win = next.slice(i, i + step);
     const worst = win.reduce((a, b) => (b.code > a.code ? b : a));
@@ -311,9 +320,11 @@ function tempCard({ fc, at, feels }: CardContext): Node[] {
   const lead = feels ? cur.feels ?? cur.temp : cur.temp;
   const cond = condition(cur.code, cur.isDay);
   const day = [...fc.daily].reverse().find((d) => d.t <= cur.t + 2 * HOUR) ?? fc.daily[0];
+  // high and low in the same terms as the headline: feels-like or actual
+  const hiLo = (d: PointForecast['daily'][number]): [number, number] => (feels && num(d.fmax) && num(d.fmin) ? [d.fmax, d.fmin] : [d.max, d.min]);
   const sub = [
     feels ? `actual ${fmt('temp', cur.temp)}` : num(cur.feels) ? `feels ${fmt('temp', cur.feels)}` : '',
-    day ? `H ${fmt('temp', day.max)} · L ${fmt('temp', day.min)}` : '',
+    day ? `H ${fmt('temp', hiLo(day)[0])} · L ${fmt('temp', hiLo(day)[1])}` : '',
   ].filter(Boolean).join(' · ');
   const head = headline(fmt('temp', lead), cond.label, sub, colorAt(TEMPERATURE, lead));
   head.querySelector('.lc-word')?.prepend(h('span', { class: 'lc-cond', 'aria-hidden': 'true' }, cond.icon));
@@ -322,7 +333,7 @@ function tempCard({ fc, at, feels }: CardContext): Node[] {
   const rain24 = sum(next.map((x) => x.precip ?? 0));
   const dew = cur.dew;
   const followDays = fc.daily.filter((d) => d.t > cur.t + 2 * HOUR).slice(0, 4);
-  const hoursOf = (d: { t: number }) => fc.hours.filter((x) => x.t >= d.t - 7 * HOUR && x.t < d.t + 17 * HOUR);
+  const hoursOf = (d: { t: number }) => fc.hours.filter((x) => x.t >= d.t && x.t < d.t + 24 * HOUR); // t: local midnight
   return [
     head,
     sentence(tempSay(next, tz, !!feels)),
@@ -339,7 +350,8 @@ function tempCard({ fc, at, feels }: CardContext): Node[] {
       ? days(
           followDays.map((d) => {
             const hs = hoursOf(d);
-            return { t: d.t + 5 * HOUR, icon: hs.length ? dayIcon(hs) : undefined, main: `${fmt('temp', d.max)}`, note: `low ${fmt('temp', d.min)}`, color: colorAt(TEMPERATURE, d.max) };
+            const [hi, lo] = hiLo(d);
+            return { t: d.t + 12 * HOUR, icon: hs.length ? dayIcon(hs) : undefined, main: `${fmt('temp', hi)}`, note: `low ${fmt('temp', lo)}`, color: colorAt(TEMPERATURE, hi) };
           }),
           tz,
         )

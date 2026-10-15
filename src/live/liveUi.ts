@@ -127,6 +127,7 @@ export class LiveUI {
         'NOAA GFS 0.25° global model',
         h('br'),
         ...(this.c.layer.id === 'snow' ? ['US & Alaska snow: NOAA HRRR 3 km', h('br')] : []),
+        ...(this.c.layer.id === 'temp' || this.c.layer.id === 'feels' ? ['City values: point forecasts, as in the cards', h('br')] : []),
         cyc ? `Run ${cyc.date.slice(0, 4)}-${cyc.date.slice(4, 6)}-${cyc.date.slice(6)} ${String(cyc.hour).padStart(2, '0')}Z · downscaled to terrain` : 'Loading…',
         h('br'),
         'Tap anywhere for a point forecast.',
