@@ -20,7 +20,9 @@ export type LiveVar =
 /** GRIB parameter + level as written in the .idx inventory */
 const RECORDS: Record<LiveVar, string[]> = {
   temp: ['TMP:2 m above ground'],
-  feels: ['APTMP:2 m above ground'],
+  // feels-like is computed from these (Steadman's apparent temperature, as in the climate finder):
+  // GFS's own APTMP equals the air temperature whenever it is mild
+  feels: ['TMP:2 m above ground', 'DPT:2 m above ground', 'UGRD:10 m above ground', 'VGRD:10 m above ground'],
   precip: ['PRATE:surface'],
   csnow: ['CSNOW:surface'],
   cloud: ['TCDC:entire atmosphere'],

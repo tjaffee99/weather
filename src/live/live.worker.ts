@@ -49,10 +49,20 @@ self.onmessage = async (e: MessageEvent<LiveRequest>) => {
     let u: Float32Array | undefined, vv: Float32Array | undefined;
     switch (v) {
       case 'temp':
-      case 'feels':
       case 'dew':
         for (let i = 0; i < n; i++) out[i] = src[i] - 273.15;
         break;
+      case 'feels': {
+        // Steadman apparent temperature (shade): T + 0.33 e - 0.70 wind - 4 (e in hPa, wind in m/s),
+        // the same feels-like as the climate finder's
+        const td = fields[1].values, uu = fields[2].values, vw = fields[3].values;
+        for (let i = 0; i < n; i++) {
+          const t = src[i] - 273.15, d = Math.min(td[i] - 273.15, t);
+          const e = 6.105 * Math.exp((17.27 * d) / (237.7 + d));
+          out[i] = t + 0.33 * e - 0.7 * Math.hypot(uu[i], vw[i]) - 4.0;
+        }
+        break;
+      }
       case 'sst':
         out.set(seaSurface(fields[0].values, fields[1].values, fields[2].values, f.nx, f.ny));
         break;

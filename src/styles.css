@@ -905,6 +905,13 @@ button {
   border-radius: 10px;
   padding: 6px 9px;
 }
+.lc-fact.tint .k,
+.lc-fact.tint .n,
+.lc-day.tint .lc-day-name,
+.lc-day.tint .lc-day-note {
+  color: inherit;
+  opacity: 0.72;
+}
 .lc-fact .k,
 .lc-day-name,
 .lc-day-note {
@@ -1093,11 +1100,23 @@ table.normals thead th {
   fill: #1d1d1f;
   font-weight: 600;
 }
+/* the month table always fits the card: fixed layout, months share what the labels leave,
+   text scales with the card's width (container query units) */
+.card {
+  container-type: inline-size;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+}
 table.normals.heat {
   border-collapse: separate;
   border-spacing: 2px;
   margin: 0 -2px;
-  font-size: 10.5px;
+  width: calc(100% + 4px);
+  table-layout: fixed;
+  font-size: clamp(8.5px, 2.9cqi, 10.5px);
+}
+table.normals.heat thead th:first-child {
+  width: 23%;
 }
 table.normals.heat th,
 table.normals.heat td {
@@ -1108,7 +1127,9 @@ table.normals.heat td {
 table.normals.heat td {
   border-radius: 4px;
   cursor: default;
-  min-width: 21px;
+  overflow: hidden;
+  white-space: nowrap;
+  letter-spacing: -0.02em;
 }
 table.normals.heat td:hover {
   box-shadow: inset 0 0 0 1.5px rgba(29, 29, 31, 0.55);
@@ -1120,8 +1141,9 @@ table.normals.heat tbody th {
   text-align: left;
   font-weight: 500;
   color: var(--muted);
-  white-space: nowrap;
-  padding-right: 4px;
+  line-height: 1.15;
+  padding-right: 3px;
+  overflow-wrap: anywhere;
 }
 table.normals.heat tr.sec th {
   font-size: 10px;
@@ -1137,11 +1159,8 @@ table.normals.heat tr:first-child td {
 @media (max-width: 420px) {
   table.normals.heat {
     border-spacing: 1.5px;
-    font-size: 10px;
-    letter-spacing: -0.02em;
   }
   table.normals.heat td {
-    min-width: 0;
     padding: 3px 0;
   }
 }

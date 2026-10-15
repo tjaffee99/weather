@@ -6,7 +6,7 @@
  * the full forecast one tap away.
  */
 import { h } from '../ui/dom';
-import { AQI, CLOUD, HUMIDITY, PRECIP, SNOWFALL, TEMPERATURE, UV_INDEX, WIND, colorAt } from '../map/palettes';
+import { AQI, CLOUD, HUMIDITY, PRECIP, SNOWFALL, TEMPERATURE, UV_INDEX, WIND, colorAt, type Palette } from '../map/palettes';
 import { fmt, toDisplay, units } from '../units';
 import { condition, type Hour, type PointForecast } from './pointForecast';
 
@@ -148,19 +148,38 @@ function bars(
   return h('div', { class: 'lc-chart' }, svg);
 }
 
-function days(rows: { t: number; icon?: string; main: string; note?: string }[], tz?: string): HTMLElement {
+function days(rows: { t: number; icon?: string; main: string; note?: string; color?: string }[], tz?: string): HTMLElement {
   return h(
     'div',
     { class: 'lc-days' },
-    ...rows.map((r) => h('div', { class: 'lc-day' }, h('div', { class: 'lc-day-name' }, dayName(r.t, tz)), r.icon ? h('div', { class: 'lc-day-icon' }, r.icon) : null, h('div', { class: 'lc-day-main' }, r.main), r.note ? h('div', { class: 'lc-day-note' }, r.note) : null)),
+    ...rows.map((r) =>
+      tint(h('div', { class: 'lc-day' }, h('div', { class: 'lc-day-name' }, dayName(r.t, tz)), r.icon ? h('div', { class: 'lc-day-icon' }, r.icon) : null, h('div', { class: 'lc-day-main' }, r.main), r.note ? h('div', { class: 'lc-day-note' }, r.note) : null), r.color),
+    ),
   );
 }
 
-const facts = (...items: [string, string, string?][]) =>
+/** Colours for tiles without a map palette of their own. */
+const SUN_TILE: Palette = { stops: [[0, '#dfe5ee'], [4, '#f3ebc4'], [8, '#f7d873'], [11, '#f5b324'], [14, '#ec8a12']] };
+const CHANCE_TILE: Palette = { stops: [[0, '#eef1f5'], [30, '#cfe0f2'], [60, '#8fb8e6'], [100, '#3f7fd0']] };
+
+/** A soft tint of a palette colour for a tile, with readable ink. */
+function tint(el: HTMLElement, rgb: string | undefined, k = 0.55) {
+  if (!rgb) return el;
+  const c = rgb.match(/\d+/g)!.map(Number);
+  const bg = c.map((v) => Math.round(v + (255 - v) * k));
+  const lum = bg.reduce((s, v, i) => s + [0.2126, 0.7152, 0.0722][i] * Math.pow(v / 255, 2.2), 0);
+  el.style.background = `rgb(${bg.join(',')})`;
+  el.style.color = lum < 0.3 ? '#fff' : '#1d1d1f';
+  el.classList.add('tint');
+  return el;
+}
+
+/** Fact tiles: label, value, note and an optional colour (rgb) to tint the tile. */
+const facts = (...items: [string, string, string?, string?][]) =>
   h(
     'div',
     { class: `lc-facts${items.filter(([, v]) => v).length > 3 ? ' grid' : ''}` },
-    ...items.filter(([, v]) => v).map(([k, v, n]) => h('div', { class: 'lc-fact' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), n ? h('div', { class: 'n' }, n) : null)),
+    ...items.filter(([, v]) => v).map(([k, v, n, c]) => tint(h('div', { class: 'lc-fact' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), n ? h('div', { class: 'n' }, n) : null), c)),
   );
 
 /** Worst weather code over some hours, for a day icon. */
@@ -309,18 +328,18 @@ function tempCard({ fc, at, feels }: CardContext): Node[] {
     sentence(tempSay(next, tz, !!feels)),
     tempCurve(next, tz, !!feels),
     facts(
-      ['Wind', num(cur.wind) ? fmt('speed', cur.wind) : '—', num(cur.gust) ? `gusts ${fmt('speed', cur.gust, false)}` : num(cur.wind) ? windShort(cur.wind) : undefined],
-      ['Humidity', num(cur.humidity) ? fmt('percent', cur.humidity) : '—', num(dew) ? `dew point ${fmt('temp', dew)}` : undefined],
-      ['Rain', `${Math.round(popMax || 0)}%`, rain24 >= 0.1 ? `total ${fmt('precip', rain24)}` : 'next 24 h'],
-      ...(num(day?.uv) ? [['UV today', String(Math.round(day!.uv!)), uvLevel(day!.uv!).toLowerCase()] as [string, string, string]] : []),
-      ...(num(day?.sun) ? [['Sunshine', `${day!.sun!.toFixed(1)} h`, 'today'] as [string, string, string]] : []),
-      ...(fc.air ? [['Air quality', String(Math.round(fc.air.aqi)), aqiWord(fc.air.aqi).toLowerCase()] as [string, string, string]] : []),
+      ['Wind', num(cur.wind) ? fmt('speed', cur.wind) : '—', num(cur.gust) ? `gusts ${fmt('speed', cur.gust, false)}` : num(cur.wind) ? windShort(cur.wind) : undefined, num(cur.wind) ? colorAt(WIND, cur.wind) : undefined],
+      ['Humidity', num(cur.humidity) ? fmt('percent', cur.humidity) : '—', num(dew) ? `dew point ${fmt('temp', dew)}` : undefined, num(cur.humidity) ? colorAt(HUMIDITY, cur.humidity) : undefined],
+      ['Rain', `${Math.round(popMax || 0)}%`, rain24 >= 0.1 ? `total ${fmt('precip', rain24)}` : 'next 24 h', colorAt(CHANCE_TILE, popMax || 0)],
+      ...(num(day?.uv) ? [['UV today', String(Math.round(day!.uv!)), uvLevel(day!.uv!).toLowerCase(), colorAt(UV_INDEX, Math.round(day!.uv!))] as [string, string, string, string]] : []),
+      ...(num(day?.sun) ? [['Sunshine', `${day!.sun!.toFixed(1)} h`, 'today', colorAt(SUN_TILE, day!.sun!)] as [string, string, string, string]] : []),
+      ...(fc.air ? [['Air quality', String(Math.round(fc.air.aqi)), aqiWord(fc.air.aqi).toLowerCase(), colorAt(AQI, fc.air.aqi)] as [string, string, string, string]] : []),
     ),
     followDays.length
       ? days(
           followDays.map((d) => {
             const hs = hoursOf(d);
-            return { t: d.t + 5 * HOUR, icon: hs.length ? dayIcon(hs) : undefined, main: `${fmt('temp', d.max)}`, note: `low ${fmt('temp', d.min)}` };
+            return { t: d.t + 5 * HOUR, icon: hs.length ? dayIcon(hs) : undefined, main: `${fmt('temp', d.max)}`, note: `low ${fmt('temp', d.min)}`, color: colorAt(TEMPERATURE, d.max) };
           }),
           tz,
         )
@@ -362,9 +381,12 @@ function precipCard({ fc, at }: CardContext): Node[] {
       { tz, max: Math.max(2, peak), every: 3 },
     ),
     h('div', { class: 'lc-legend' }, 'Bars: amount each hour · shading: chance of rain'),
-    facts(['Next 24 hours', total >= 0.1 ? fmt('precip', total) : 'none'], ['Highest chance', `${Math.round(max(next.map((x) => x.pop ?? 0)) || 0)}%`]),
+    facts(
+      ['Next 24 hours', total >= 0.1 ? fmt('precip', total) : 'none', undefined, total >= 0.1 ? colorAt(PRECIP, Math.max(0.2, total / 6)) : undefined],
+      ['Highest chance', `${Math.round(max(next.map((x) => x.pop ?? 0)) || 0)}%`, undefined, colorAt(CHANCE_TILE, max(next.map((x) => x.pop ?? 0)) || 0)],
+    ),
     days(
-      dd.map((d) => ({ t: d.t, icon: dayIcon(d.hours), main: `${Math.round(max(d.hours.map((x) => x.pop ?? 0)) || 0)}%`, note: sum(d.hours.map((x) => x.precip ?? 0)) >= 0.1 ? fmt('precip', sum(d.hours.map((x) => x.precip ?? 0))) : 'dry' })),
+      dd.map((d) => ({ t: d.t, icon: dayIcon(d.hours), main: `${Math.round(max(d.hours.map((x) => x.pop ?? 0)) || 0)}%`, note: sum(d.hours.map((x) => x.precip ?? 0)) >= 0.1 ? fmt('precip', sum(d.hours.map((x) => x.precip ?? 0))) : 'dry', color: colorAt(CHANCE_TILE, max(d.hours.map((x) => x.pop ?? 0)) || 0) })),
       tz,
     ),
   ];
@@ -391,10 +413,20 @@ function cloudCard({ fc, at }: CardContext): Node[] {
     say ? sentence(say) : null,
     bars(next.map((x, i) => ({ t: x.t, v: x.cloud ?? 0, color: x.isDay ? colorAt(CLOUD, x.cloud ?? 0) : '#9aa6b8', label: num(x.cloud) ? `${Math.round(x.cloud)}` : undefined, mark: i === 0 })), { tz, max: 100, every: 3 }),
     h('div', { class: 'lc-legend' }, 'Cloud cover each hour (%) · darker bars: night'),
-    facts(['Sunshine today', num(today?.sun) ? `${today!.sun!.toFixed(1)} h` : ''], ['Now', condition(cur.code, cur.isDay).label]),
+    facts(
+      ['Sunshine today', num(today?.sun) ? `${today!.sun!.toFixed(1)} h` : '', undefined, num(today?.sun) ? colorAt(SUN_TILE, today!.sun!) : undefined],
+      ['Now', condition(cur.code, cur.isDay).label, undefined, num(c) ? colorAt(CLOUD, c) : undefined],
+    ),
     sunDays.length
-      ? days(sunDays.map((d) => ({ t: d.t + 12 * HOUR, icon: '☀️', main: `${d.sun!.toFixed(1)} h`, note: 'sunshine' })), tz)
-      : days(dd.map((d) => ({ t: d.t, icon: dayIcon(d.hours), main: `${Math.round(sum(d.hours.filter((x) => x.isDay).map((x) => x.cloud ?? 0)) / Math.max(1, d.hours.filter((x) => x.isDay).length))}%` })), tz),
+      ? days(sunDays.map((d) => ({ t: d.t + 12 * HOUR, icon: '☀️', main: `${d.sun!.toFixed(1)} h`, note: 'sunshine', color: colorAt(SUN_TILE, d.sun!) })), tz)
+      : days(
+          dd.map((d) => {
+            const lit = d.hours.filter((x) => x.isDay);
+            const pct = sum(lit.map((x) => x.cloud ?? 0)) / Math.max(1, lit.length);
+            return { t: d.t, icon: dayIcon(d.hours), main: `${Math.round(pct)}%`, color: colorAt(CLOUD, pct) };
+          }),
+          tz,
+        ),
   ].filter(Boolean) as Node[];
 }
 
@@ -423,7 +455,7 @@ function uvCard({ fc, at }: CardContext): Node[] {
     sentence(say),
     bars(chartHours.map((x) => ({ t: x.t, v: x.uv ?? 0, color: colorAt(UV_INDEX, x.uv ?? 0), label: (x.uv ?? 0) >= 0.5 ? String(Math.round(x.uv!)) : undefined, mark: x.t === cur.t })), { tz, max: Math.max(8, peak?.uv ?? 0), every: 2 }),
     h('div', { class: 'lc-legend' }, 'UV index through today (local time) · 3+ needs protection'),
-    days(fc.daily.filter((d) => d.t > cur.t && num(d.uv)).slice(0, 4).map((d) => ({ t: d.t + 12 * HOUR, main: String(Math.round(d.uv!)), note: uvLevel(d.uv!).toLowerCase() })), tz),
+    days(fc.daily.filter((d) => d.t > cur.t && num(d.uv)).slice(0, 4).map((d) => ({ t: d.t + 12 * HOUR, main: String(Math.round(d.uv!)), note: uvLevel(d.uv!).toLowerCase(), color: colorAt(UV_INDEX, Math.round(d.uv!)) })), tz),
   ];
 }
 
@@ -452,7 +484,12 @@ function airCard({ fc, air }: CardContext): Node[] {
       ? bars(series.map(([t, a], i) => ({ t, v: a, color: colorAt(AQI, a), label: String(Math.round(a)), mark: i === 0 })), { tz, max: Math.max(150, worst?.[1] ?? 0), every: 1, height: 84 })
       : h('div', { class: 'lc-legend' }, 'Loading the next two days…'),
     series.length > 1 ? h('div', { class: 'lc-legend' }, 'Next 48 hours, every 6 hours') : null,
-    worst && best ? facts(['Worst', `${Math.round(worst[1])} · ${dayName(worst[0], tz)} ${hourName(worst[0], tz)}`], ['Best', `${Math.round(best[1])} · ${dayName(best[0], tz)} ${hourName(best[0], tz)}`]) : null,
+    worst && best
+      ? facts(
+          ['Worst', `${Math.round(worst[1])} · ${dayName(worst[0], tz)} ${hourName(worst[0], tz)}`, undefined, colorAt(AQI, worst[1])],
+          ['Best', `${Math.round(best[1])} · ${dayName(best[0], tz)} ${hourName(best[0], tz)}`, undefined, colorAt(AQI, best[1])],
+        )
+      : null,
     h('div', { class: 'note' }, 'NOAA aerosol forecast (GEFS-Aerosols), matched to satellite and ground-monitor estimates. Fine particles (PM2.5) only.'),
   ].filter(Boolean) as Node[];
 }
@@ -468,7 +505,7 @@ function snowCard({ fc, at }: CardContext): Node[] {
     headline(num(depth) && depth >= 0.5 ? fmt('snow', depth) : 'None', num(depth) && depth >= 0.5 ? 'of snow on the ground' : 'no snow on the ground', undefined, num(depth) && depth >= 0.5 ? '#9fb4ff' : undefined),
     sentence(fresh >= 0.1 ? `${fmt('snow', fresh)} of fresh snow in the next 24 hours.` : any ? 'Snow on the way in the coming days.' : 'No snow in the forecast.'),
     any ? bars(next.map((x, i) => ({ t: x.t, v: x.snowfall ?? 0, color: colorAt(SNOWFALL, Math.max(0.05, (x.snowfall ?? 0) / 10)), label: (x.snowfall ?? 0) >= 0.1 ? fmt('snow', x.snowfall!, false) : undefined, mark: i === 0 })), { tz, max: Math.max(1, max(next.map((x) => x.snowfall ?? 0))), every: 3 }) : null,
-    dd.length ? days(dd.map((d) => ({ t: d.t + 12 * HOUR, icon: (d.snowfall ?? 0) >= 0.1 ? '❄️' : '·', main: (d.snowfall ?? 0) >= 0.1 ? fmt('snow', d.snowfall!) : '—', note: 'fresh snow' })), tz) : null,
+    dd.length ? days(dd.map((d) => ({ t: d.t + 12 * HOUR, icon: (d.snowfall ?? 0) >= 0.1 ? '❄️' : '·', main: (d.snowfall ?? 0) >= 0.1 ? fmt('snow', d.snowfall!) : '—', note: 'fresh snow', color: (d.snowfall ?? 0) >= 0.1 ? colorAt(SNOWFALL, Math.max(0.05, d.snowfall! / 10)) : undefined })), tz) : null,
     h('div', { class: 'note' }, 'Point forecast: Open-Meteo. The map shows snow depth from NOAA GFS, and HRRR over the US.'),
   ].filter(Boolean) as Node[];
 }
@@ -491,7 +528,7 @@ function windCard({ fc, at }: CardContext): Node[] {
     strongest ? sentence(`Strongest ${num(strongest.gust) ? 'gusts' : 'wind'} around ${hourName(strongest.t, tz)}: ${fmt('speed', strongest.gust ?? strongest.wind!)}.`) : null,
     bars(next.map((x, i) => ({ t: x.t, v: x.wind ?? 0, back: num(x.gust) ? x.gust / Math.max(40, max(next.map((y) => y.gust ?? y.wind ?? 0))) : undefined, color: colorAt(WIND, x.wind ?? 0), label: num(x.wind) ? fmt('speed', x.wind, false) : undefined, mark: i === 0 })), { tz, max: Math.max(40, max(next.map((y) => y.gust ?? y.wind ?? 0))), every: 3 }),
     h('div', { class: 'lc-legend' }, `Wind each hour (${units.imperial ? 'mph' : 'km/h'}) · shading: gusts`),
-    days(dd.map((d) => ({ t: d.t, main: fmt('speed', max(d.hours.map((x) => x.wind ?? 0))), note: `gusts ${fmt('speed', max(d.hours.map((x) => x.gust ?? 0)), false)}` })), tz),
+    days(dd.map((d) => ({ t: d.t, main: fmt('speed', max(d.hours.map((x) => x.wind ?? 0))), note: `gusts ${fmt('speed', max(d.hours.map((x) => x.gust ?? 0)), false)}`, color: colorAt(WIND, max(d.hours.map((x) => x.wind ?? 0))) })), tz),
   ].filter(Boolean) as Node[];
 }
 
