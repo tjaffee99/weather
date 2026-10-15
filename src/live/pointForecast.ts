@@ -1,8 +1,8 @@
 /**
  * Point forecast for the location card, from the free Open-Meteo API (best
  * available high-resolution model for the location, elevation-corrected, with
- * WMO weather codes for conditions). The map's field is NOAA GFS; its city
- * labels use this same forecast (pointLabels.ts).
+ * WMO weather codes for conditions). The map itself stays on NOAA GFS; the
+ * card's temperatures start from the map's (anchorForecast).
  */
 import { apparentTemp } from './feels';
 
@@ -94,6 +94,32 @@ function dayRange(hours: Hour[], t: number): { max?: number; min?: number; fmax?
   if (hs.length < 20) return {};
   const ts = hs.map((x) => x.temp), fs = hs.filter((x) => x.feels != null).map((x) => x.feels!);
   return { max: Math.max(...ts), min: Math.min(...ts), ...(fs.length >= 20 ? { fmax: Math.max(...fs), fmin: Math.min(...fs) } : {}) };
+}
+
+const HOUR = 3600_000;
+/** e-folding time of the map anchor (anchorForecast) */
+const ANCHOR_FADE = 6 * HOUR;
+
+/**
+ * The forecast with its temperatures starting from the map's at time `at`:
+ * the difference between the map and the forecast there is added to every
+ * hour, fading out (e-folding 6 hours) so the forecast takes over. The card
+ * then shows the map's number for the place and moment on the map, and moves
+ * smoothly from place to place like the map does, instead of jumping between
+ * the point forecast's grid cells.
+ */
+export function anchorForecast(fc: PointForecast, at: number, now: { temp: number; feels: number }): PointForecast {
+  const hs = fc.hours;
+  const i = hs.findIndex((x) => x.t > at);
+  if (i <= 0) return fc;
+  const a = hs[i - 1], b = hs[i], w = (at - a.t) / (b.t - a.t);
+  const dT = now.temp - (a.temp + (b.temp - a.temp) * w);
+  const dF = a.feels != null && b.feels != null ? now.feels - (a.feels + (b.feels - a.feels) * w) : dT;
+  const hours = hs.map((x) => {
+    const k = Math.exp(-Math.abs(x.t - at) / ANCHOR_FADE);
+    return { ...x, temp: x.temp + dT * k, feels: x.feels != null ? x.feels + dF * k : x.feels };
+  });
+  return { ...fc, hours, daily: fc.daily.map((d) => ({ ...d, ...dayRange(hours, d.t) })) };
 }
 
 export interface Condition {

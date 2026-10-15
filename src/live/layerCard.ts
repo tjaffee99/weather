@@ -20,6 +20,8 @@ export interface CardContext {
   air?: [number, number][];
   /** temperature card: lead with the feels-like temperature */
   feels?: boolean;
+  /** the map's values at this place and time: the card's 'now' */
+  now?: { temp: number; feels: number };
 }
 
 const HOUR = 3600_000;
@@ -314,9 +316,12 @@ function tempCurve(next: Hour[], tz: string | undefined, feels: boolean): HTMLEl
 
 const windShort = (kmh: number) => (kmh < 2 ? 'calm' : kmh < 12 ? 'light' : kmh < 29 ? 'breezy' : kmh < 39 ? 'windy' : kmh < 62 ? 'very windy' : 'stormy');
 
-function tempCard({ fc, at, feels }: CardContext): Node[] {
+function tempCard({ fc, at, feels, now }: CardContext): Node[] {
   const tz = fc.timezone;
-  const { cur, next } = window24(fc, at);
+  const w = window24(fc, at);
+  // now: the map's values at the map's time (the nearest hour's are within a fraction of a degree)
+  const cur = now ? { ...w.cur, temp: now.temp, feels: now.feels } : w.cur;
+  const next = now ? [cur, ...w.next.slice(1)] : w.next;
   const lead = feels ? cur.feels ?? cur.temp : cur.temp;
   const cond = condition(cur.code, cur.isDay);
   const day = [...fc.daily].reverse().find((d) => d.t <= cur.t + 2 * HOUR) ?? fc.daily[0];

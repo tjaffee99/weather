@@ -5,7 +5,7 @@ import { renderLegend } from '../ui/legend';
 import { cssGradient } from '../map/palettes';
 import { coordLabel, timeLabel } from '../ui/format';
 import { GLACIER } from '../map/palettes';
-import { openMeteo, type PointForecast } from './pointForecast';
+import { anchorForecast, openMeteo, type PointForecast } from './pointForecast';
 import { pm25FromAqi } from './aerosol';
 import { CARD_TITLES, layerCard, type CardKind } from './layerCard';
 import { pointElevation } from '../map/localDem';
@@ -30,6 +30,8 @@ export class LiveUI {
     lat: number;
     at: number;
     fc?: PointForecast;
+    /** the map's temperature and feels-like here at `at` */
+    now?: { temp: number; feels: number };
     error?: string;
     title: HTMLElement;
     sub: HTMLElement;
@@ -127,7 +129,6 @@ export class LiveUI {
         'NOAA GFS 0.25° global model',
         h('br'),
         ...(this.c.layer.id === 'snow' ? ['US & Alaska snow: NOAA HRRR 3 km', h('br')] : []),
-        ...(this.c.layer.id === 'temp' || this.c.layer.id === 'feels' ? ['City values: point forecasts, as in the cards', h('br')] : []),
         cyc ? `Run ${cyc.date.slice(0, 4)}-${cyc.date.slice(4, 6)}-${cyc.date.slice(6)} ${String(cyc.hour).padStart(2, '0')}Z · downscaled to terrain` : 'Loading…',
         h('br'),
         'Tap anywhere for a point forecast.',
@@ -350,6 +351,8 @@ export class LiveUI {
       .catch(() => (title.textContent = 'Selected location'));
 
     let fc: PointForecast | null = null;
+    // the map's own temperatures here: the card starts from them (anchorForecast)
+    const nowP = this.c.pointNow(lon, lat, at).catch(() => null);
     // the same corrected aerosol forecast as the map's air-quality layer
     const airP = this.c.aqiAt(lon, lat, at).then((aqi) => (Number.isFinite(aqi) ? { aqi, pm25: pm25FromAqi(aqi) } : null)).catch(() => null);
     try {
@@ -368,7 +371,10 @@ export class LiveUI {
     }
     if (token !== this.cardToken || !fc.hours.length || !this.card) return;
     fc.air = (await airP) ?? undefined;
-    this.card.fc = fc;
+    const now = await nowP;
+    if (token !== this.cardToken || !this.card) return;
+    this.card.now = now ?? undefined;
+    this.card.fc = now && fc.source === 'Open-Meteo' ? anchorForecast(fc, at, now) : fc;
     const elev = await elevP;
     if (elev !== null && token === this.cardToken) sub.textContent += ` · ${Math.round(elev)} m`;
     this.refreshCard();
@@ -398,7 +404,7 @@ export class LiveUI {
       st.body.replaceChildren(
         ...(back ? [back] : []),
         h('div', { class: 'lc-title' }, feels ? 'Feels like' : CARD_TITLES.temp),
-        ...layerCard('temp', { fc: st.fc, at: st.at, feels }),
+        ...layerCard('temp', { fc: st.fc, at: st.at, feels, now: st.now }),
       );
       return;
     }

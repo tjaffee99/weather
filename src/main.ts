@@ -110,9 +110,6 @@ function cityLayer() {
       'text-font': ['Noto Sans Regular'],
       'text-size': ['interpolate', ['linear'], ['zoom'], 1, 11, 5, 13, 9, 15],
       'text-line-height': 1.05,
-      // just below the place, so the marker of an opened city sits above its number
-      'text-anchor': 'top',
-      'text-offset': [0, 0.85],
       'text-padding': 6,
       'text-max-width': 8,
     },
@@ -180,8 +177,8 @@ function placeMarker(lon: number, lat: number) {
   marker = new maplibregl.Marker({ element: h('div', { class: 'pin' }) }).setLngLat([lon, lat]).addTo(map);
 }
 
-function openAt(lon: number, lat: number) {
-  placeMarker(lon, lat);
+function openAt(lon: number, lat: number, markAt: [number, number] = [lon, lat]) {
+  placeMarker(...markAt);
   const placeP = reverseGeocode(lon, lat, cities);
   if (mode === 'live') liveUi.showCard(lon, lat, placeP);
   else if (mode === 'atlas') atlasUi.showCard(lon, lat, placeP);
@@ -269,11 +266,10 @@ document.addEventListener('keydown', (e) => {
 });
 
 map.on('click', (e) => {
-  // a tap on a city's label opens that city (its label and card then show the same forecast)
+  // a tap on a city's label gives that city's forecast (the same numbers as its label); the marker stays where tapped
   const hit = map.getLayer('city-labels') ? map.queryRenderedFeatures(e.point, { layers: ['city-labels'] })[0] : undefined;
   const c = typeof hit?.properties?.i === 'number' ? cities[hit.properties.i] : undefined;
-  if (c) openAt(c.lon, c.lat);
-  else openAt(e.lngLat.lng, e.lngLat.lat);
+  openAt(c?.lon ?? e.lngLat.lng, c?.lat ?? e.lngLat.lat, [e.lngLat.lng, e.lngLat.lat]);
 });
 // value labels are only computed for cities on screen: refresh them after each move
 map.on('moveend', () => {
