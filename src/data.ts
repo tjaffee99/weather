@@ -73,6 +73,8 @@ export interface City {
   elev: number | null;
   /** microclimate offset curves (climate/micro.ts), stored integers */
   mc?: number[] | null;
+  /** a small town loaded with its area (towns.ts) */
+  town?: boolean;
 }
 
 export async function loadCities(base: string): Promise<City[]> {

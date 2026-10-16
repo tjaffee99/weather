@@ -15,6 +15,7 @@ import { units } from './units';
 import { ClimateUI } from './climate/climateUi';
 import { AtlasUI } from './climate/atlasUi';
 import { Microclimate } from './climate/micro';
+import { Towns } from './towns';
 
 const BASE = import.meta.env.BASE_URL;
 type Mode = 'climate' | 'atlas' | 'live';
@@ -79,6 +80,7 @@ let liveUi: LiveUI;
 let climateUi: ClimateUI;
 let atlasUi: AtlasUI;
 let micro: Microclimate;
+let towns: Towns | undefined;
 let liveReadyResolve: () => void = () => {};
 const liveReady = new Promise<void>((r) => (liveReadyResolve = r));
 let cities: City[] = [];
@@ -98,7 +100,8 @@ function cityLayer() {
     id: 'city-labels',
     type: 'symbol',
     source: 'cities',
-    filter: ['<=', ['get', 'minzoom'], ['+', ['zoom'], 2.4]],
+    // places the zoom allows, plus the biggest place in each screen cell that would show none (labels.ts)
+    filter: ['any', ['get', 'fill'], ['<=', ['get', 'minzoom'], ['+', ['zoom'], 2.4]]],
     layout: {
       'symbol-sort-key': ['get', 'rank'],
       'text-field': [
@@ -271,11 +274,16 @@ map.on('click', (e) => {
   const c = typeof hit?.properties?.i === 'number' ? cities[hit.properties.i] : undefined;
   openAt(c?.lon ?? e.lngLat.lng, c?.lat ?? e.lngLat.lat, [e.lngLat.lng, e.lngLat.lat]);
 });
-// value labels are only computed for cities on screen: refresh them after each move
-map.on('moveend', () => {
+function refreshLabels() {
   if (mode === 'climate') climateUi?.updateCities();
   else if (mode === 'atlas') atlasUi?.updateCities();
   else if (mode === 'live') live?.updateCities();
+}
+// value labels are only computed for cities on screen: refresh them after each move,
+// and again when the small towns of a newly reached area have loaded
+map.on('moveend', () => {
+  refreshLabels();
+  towns?.update(map);
 });
 
 // keep the visible map centred in the area not covered by the side panel
@@ -297,6 +305,9 @@ map.on('load', async () => {
     const [d, cs] = await Promise.all([loadDem(BASE), loadCities(BASE)]);
     cities = cs;
     dem = d;
+    towns = new Towns(BASE, cities);
+    towns.onLoad = refreshLabels;
+    towns.update(map);
     field.setDem(dem.w, dem.h, dem.q);
     new LocalDem(map, (d) => field.setLocalDem(d));
     live = new LiveController(map, field, dem, cities);

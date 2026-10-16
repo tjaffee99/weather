@@ -20,7 +20,7 @@ import { MONTHS, MONTH_START, coordLabel, doyLabel, timeLabel, todayDoy } from '
 import { fmt, fromDisplay, toDisplay, unitLabel, units } from '../units';
 import { CRITERIA, GROUPS, PRESETS, type CritDef, type CritState } from './criteria';
 import { blendTaps, levelOf } from './blend';
-import { labelFilter } from '../map/labels';
+import { cityFeatures } from '../map/labels';
 import { hideTip, monthTable, sourceNote, summary, yearChart } from './card';
 import { SEASON_WEIGHTS, cityCoefs, microOffset, seasonOf, type MicroCoefs, type MicroVar, type Microclimate } from './micro';
 import { DZ0, DZ_STEP, LEVELS, type ClimVar, type ClimateMeta, type CritVar, type Criterion, type DetailResult } from './types';
@@ -787,15 +787,7 @@ export class ClimateUI {
   updateCities() {
     const src = this.map.getSource('cities') as GeoJSONSource | undefined;
     if (!src || !this.active) return;
-    const visible = labelFilter(this.map);
-    src.setData({
-      type: 'FeatureCollection',
-      features: this.cities.map((c, i) => ({
-        type: 'Feature' as const,
-        geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
-        properties: { i, name: c.name, label: visible(c) ? this.cityLabel(c) : '', rank: c.rank, minzoom: c.minzoom },
-      })),
-    });
+    src.setData(cityFeatures(this.map, this.cities, (c) => this.cityLabel(c)));
   }
 
   // ---------- location card ----------

@@ -1,0 +1,1 @@
+{"fields":["name","country","lat","lon","pop","minzoom","rank","elev","mc"],"rows":[["Alice Springs","Australia",-23.6975,133.8836,25912,9.0,6491,583,[-5,1,0,0,1,1,-1,0,0,0]],["Desert Springs","Australia",-23.7155,133.8877,1950,11.4,83214,584,[-6,1,0,0,1,1,-1,0,0,0]]]}

@@ -19,7 +19,7 @@ import { renderLegend } from '../ui/legend';
 import { MONTHS, coordLabel, doyLabel } from '../ui/format';
 import { fmt, fromDisplay, units } from '../units';
 import { blendTaps, levelOf } from './blend';
-import { labelFilter } from '../map/labels';
+import { cityFeatures } from '../map/labels';
 import { hideTip, monthTable } from './card';
 import type { ClimateUI } from './climateUi';
 import { DAYS_IN_MONTH, MONTH_START, decodeAtlas, evalAt, evalField, periodDays, periodWeights, type AtlasField, type Period, type PeriodKind } from './atlasData';
@@ -657,24 +657,18 @@ export class AtlasUI {
     const cur = this.current;
     if (!src || !this.active || !cur) return;
     this.labelAt = performance.now();
-    const visible = labelFilter(this.map);
     const { def, f, w, days } = cur;
     const k = this.period.kind;
     if (k !== 'year') this.renderLegendWhen();
-    src.setData({
-      type: 'FeatureCollection',
-      features: this.cities.map((c, i) => {
-        const ok = visible(c) && (!f.flags || this.nearSea(f, c.lon, c.lat));
+    src.setData(
+      cityFeatures(this.map, this.cities, (c) => {
+        if (f.flags && !this.nearSea(f, c.lon, c.lat)) return '';
         // microclimate offsets only while the map shows them (zoomed in), so labels match the colours
         const off = this.micro?.shown ? this.microFor(def, cityCoefs(c.mc, this.micro.scale), this.period) : 0;
-        const v = ok ? this.sample(def, f, w, c.lon, c.lat, c.elev ?? demAt(this.dem, c.lon, c.lat), days, off) : NaN;
-        return {
-          type: 'Feature' as const,
-          geometry: { type: 'Point' as const, coordinates: [c.lon, c.lat] },
-          properties: { i, name: c.name, label: Number.isFinite(v) ? def.fmt(v, k) : '', rank: c.rank, minzoom: c.minzoom },
-        };
+        const v = this.sample(def, f, w, c.lon, c.lat, c.elev ?? demAt(this.dem, c.lon, c.lat), days, off);
+        return Number.isFinite(v) ? def.fmt(v, k) : '';
       }),
-    });
+    );
   }
 
   /** Keep the legend's date in step while scrubbing. */
