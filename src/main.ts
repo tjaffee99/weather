@@ -170,7 +170,7 @@ async function setMode(m: Mode) {
 
 function updateUrlMode() {
   const u = new URL(location.href);
-  if (mode === 'live' || mode === 'atlas') u.searchParams.set('mode', mode);
+  if (mode === 'atlas' || mode === 'climate') u.searchParams.set('mode', mode);
   else u.searchParams.delete('mode');
   history.replaceState(null, '', u);
 }
@@ -339,14 +339,16 @@ map.on('load', async () => {
           if (mode === 'live') setStatus(`Live data unavailable: ${(e as Error).message}`, false, true);
         })
         .finally(liveReadyResolve);
-    // the climate finder is the home page; the live forecast warms up behind it
-    const start = new URL(location.href).searchParams.get('mode');
-    if (start === 'live') {
+    // live weather is the home page; ?mode=atlas or ?mode=climate open the others (live warms up behind them)
+    const params = new URL(location.href).searchParams;
+    // older links to the finder or atlas carry their settings (c=, a=) without a mode
+    const start = params.get('mode') ?? (params.has('c') ? 'climate' : params.has('a') ? 'atlas' : null);
+    if (start === 'atlas' || start === 'climate') {
+      await setMode(start);
+      startLive();
+    } else {
       startLive();
       await setMode('live');
-    } else {
-      await setMode(start === 'atlas' ? 'atlas' : 'climate');
-      startLive();
     }
   } catch (e) {
     console.error(e);
