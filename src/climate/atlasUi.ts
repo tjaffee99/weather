@@ -475,8 +475,8 @@ export class AtlasUI {
   }
   private labelAt = 0;
 
-  private palette(): Palette {
-    const d = this.def, k = this.period.kind;
+  private palette(d = this.def): Palette {
+    const k = this.period.kind;
     if (!d.sum || k === 'month') return d.palette;
     return scaled(d.palette, k === 'day' ? PER_DAY : (d.yearScale ?? 12));
   }
@@ -745,6 +745,8 @@ export class AtlasUI {
     full: boolean;
     /** repaint the place line (its elevation follows the units) */
     paintSub?: () => void;
+    /** at sea: the card is about sea temperature (the land climate nearby doesn't apply) */
+    water: boolean;
     /** a variable's total (sums) or average for a period here, NaN where there is none */
     at?: (id: string, p: Period) => number;
     micro: boolean;
@@ -761,14 +763,21 @@ export class AtlasUI {
     const sub = h('div', { class: 'coords' }, coordLabel(lon, lat));
     const body = h('div', {}, h('div', { class: 'desc' }, 'Loading climate…'));
     card.append(close, title, sub, body);
-    const st: NonNullable<AtlasUI['card']> = { lon, lat, body, full: false, micro: false };
+    const st: NonNullable<AtlasUI['card']> = { lon, lat, body, full: false, micro: false, water: false };
+    // on the map's water where tapped (a search result may still be off screen: land then)
+    const pt = this.map.project([lon, lat]);
+    const onWater = !!this.map.getLayer('water') && this.map.queryRenderedFeatures(pt, { layers: ['water'] }).length > 0;
     this.card = st;
     const [elevP, place] = await Promise.all([pointElevation(lon, lat).catch(() => null), (placeP ?? Promise.resolve(null)).catch(() => null)]);
     if (this.card !== st) return;
     const elev = elevP ?? demAt(this.dem, lon, lat);
-    title.textContent = place?.name ?? 'Selected location';
-    st.paintSub = () => (sub.textContent = [place?.detail, coordLabel(lon, lat), units.imperial ? `${Math.round(elev * 3.281)} ft` : `${Math.round(elev)} m`].filter(Boolean).join(' · '));
-    st.paintSub();
+    const named = () => {
+      title.textContent = place?.name ?? (st.water ? 'At sea' : 'Selected location');
+      const height = st.water ? '' : units.imperial ? `${Math.round(elev * 3.281)} ft` : `${Math.round(elev)} m`;
+      sub.textContent = [place?.detail, coordLabel(lon, lat), height].filter(Boolean).join(' · ');
+    };
+    st.paintSub = named;
+    named();
 
     const ids = ATLAS_VARS.map((v) => v.id);
     const [loaded, mc] = await Promise.all([Promise.all(ids.map((id) => this.load(id).catch(() => null))), this.micro?.at(lon, lat).catch(() => null) ?? null]);
@@ -781,6 +790,8 @@ export class AtlasUI {
       if (f.flags && !this.nearSea(f, lon, lat)) return NaN;
       return this.sample(d, f, periodWeights(p, f.nc), lon, lat, elev, d.sum ? periodDays(p) : 1, this.microFor(d, mc, p));
     };
+    st.water = onWater && Number.isFinite(st.at('sst', YEAR));
+    named();
     this.renderCard();
   }
 
@@ -788,23 +799,25 @@ export class AtlasUI {
   private renderCard() {
     const st = this.card;
     if (!st?.at || !st.body.isConnected) return;
-    if (!Number.isFinite(st.at('tmax', YEAR))) {
+    if (!st.water && !Number.isFinite(st.at('tmax', YEAR))) {
       st.body.replaceChildren(h('div', { class: 'desc' }, 'No climate data here (open ocean or Antarctica).'));
       return;
     }
+    // at sea the map shows sea temperature whatever is picked: so does the card
+    const def = st.water ? ATLAS_VARS.find((v) => v.id === 'sst')! : this.def;
     this.els.card.classList.toggle('compact', !st.full);
     if (st.full) {
-      const back = h('button', { class: 'lc-switch back', onclick: () => ((st.full = false), this.renderCard()) }, `‹ ${this.def.label}`);
-      st.body.replaceChildren(back, ...this.fullCard(st.at, st.micro));
+      const back = h('button', { class: 'lc-switch back', onclick: () => ((st.full = false), this.renderCard()) }, `‹ ${def.label}`);
+      st.body.replaceChildren(back, ...this.fullCard(st.at, st.micro, st.water));
     } else {
       const more = h('button', { class: 'lc-switch', onclick: () => ((st.full = true), this.renderCard()) }, 'Full climate ›');
-      st.body.replaceChildren(...this.varCard(st.at), more);
+      st.body.replaceChildren(...this.varCard(st.at, def), more);
     }
   }
 
   /** The shown variable here: its value for the period, the year month by month, its extremes. */
-  private varCard(at: (id: string, p: Period) => number): Node[] {
-    const d = this.def, p = this.period, k = p.kind;
+  private varCard(at: (id: string, p: Period) => number, d = this.def): Node[] {
+    const p = this.period, k = p.kind;
     const fin = (v: number) => Number.isFinite(v);
     const v = at(d.id, p);
     const months = MONTH_START.slice(0, 12).map((s0, m) => at(d.id, { kind: 'month', m, d: s0 + 14 }));
@@ -833,7 +846,7 @@ export class AtlasUI {
         );
     return [
       title,
-      headline(fin(v) ? d.fmt(v, k) : '—', this.periodLabel(), d.hint, fin(v) ? colorAt(this.palette(), v) : undefined),
+      headline(fin(v) ? d.fmt(v, k) : '—', this.periodLabel(), d.hint, fin(v) ? colorAt(this.palette(d), v) : undefined),
       chart,
       h('div', { class: 'lc-legend' }, `Month by month (${d.sum ? `total, ${d.unit('month')}` : d.unit('month')})`),
       facts(
@@ -845,12 +858,14 @@ export class AtlasUI {
   }
 
   /** The full climate of the place: the year at a glance and every variable month by month. */
-  private fullCard(at: (id: string, p: Period) => number, micro: boolean): Node[] {
+  private fullCard(at: (id: string, p: Period) => number, micro: boolean, water: boolean): Node[] {
     const def = (id: string) => ATLAS_VARS.find((v) => v.id === id)!;
-    const y = (id: string) => at(id, YEAR);
+    // at sea only the sea's own numbers: the land climate nearby doesn't apply out here
+    const y = (id: string) => (water && id !== 'sst' ? NaN : at(id, YEAR));
+    if (water) at = ((get) => (id: string, p: Period) => (id === 'sst' ? get(id, p) : NaN))(at);
     const stat = (k: string, v: string, n?: string) => h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), n ? h('div', { class: 'n' }, n) : null);
     const fin = (v: number) => Number.isFinite(v);
-    const tiles = [
+    const tiles = water ? [stat('Sea', def('sst').fmt(y('sst'), 'year'), 'average sea surface temperature')] : [
       stat('Average', def('tmean').fmt(y('tmean'), 'year'), `high ${def('tmax').fmt(y('tmax'), 'year', false)} · low ${def('tmin').fmt(y('tmin'), 'year', false)}`),
       stat('Sunshine', `${def('sun').fmt(y('sun'), 'year')} a year`, fin(y('uv')) ? `UV peak ${Math.round(y('uv'))} on average` : undefined),
       stat('Precipitation', `${def('precip').fmt(y('precip'), 'year')} a year`, `${Math.round(y('wetdays'))} wet days`),
@@ -882,7 +897,9 @@ export class AtlasUI {
       h(
         'div',
         { class: 'note' },
-        `Normals from 25 years of weather (ERA5 reanalysis, 2001–2025), blended from nearby ~100 km grid cells with temperatures, rain and snow adjusted to this spot’s elevation${micro ? ', and temperatures to its local microclimate (WorldClim)' : ''}. Air quality: NOAA’s aerosol model matched to satellite and ground-monitor estimates (2021–2025). Hover a cell for details.`,
+        water
+          ? 'Sea surface temperature normals from 25 years of ERA5 reanalysis (2001–2025), blended from nearby ~100 km grid cells. Hover a cell for details.'
+          : `Normals from 25 years of weather (ERA5 reanalysis, 2001–2025), blended from nearby ~100 km grid cells with temperatures, rain and snow adjusted to this spot’s elevation${micro ? ', and temperatures to its local microclimate (WorldClim)' : ''}. Air quality: NOAA’s aerosol model matched to satellite and ground-monitor estimates (2021–2025). Hover a cell for details.`,
       ),
     ];
   }
