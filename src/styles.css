@@ -862,11 +862,6 @@ button {
   font-size: 22px;
   color: var(--muted);
 }
-.lc-say {
-  font-size: 13.5px;
-  line-height: 1.4;
-  margin: 6px 0 8px;
-}
 .lc-chart svg {
   display: block;
   overflow: visible;
@@ -885,6 +880,12 @@ button {
 .lc-bars .lc-axis {
   font-size: 9px;
   fill: var(--faint);
+}
+/* the month shown on the map (atlas cards) */
+.lc-bars .lc-val.lc-mark,
+.lc-bars .lc-axis.lc-mark {
+  font-weight: 700;
+  fill: var(--text);
 }
 .lc-legend {
   font-size: 11px;

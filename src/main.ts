@@ -321,7 +321,7 @@ map.on('load', async () => {
     climateUi.live = live;
     climateUi.liveReady = liveReady;
     climateUi.nowCard = (lon, lat, placeP) => liveUi.showCard(lon, lat, placeP ?? reverseGeocode(lon, lat, cities));
-    atlasUi = new AtlasUI(map, field, els, climateUi, cities, dem, setStatus, BASE);
+    atlasUi = new AtlasUI(map, field, els, climateUi, cities, dem, setStatus, BASE, closeCard);
     // microclimates (fog coasts, inland heat, ...) for the finder and atlas when zoomed in
     micro = new Microclimate(BASE, map);
     micro.onUpdate = (m) => {

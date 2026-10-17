@@ -9,7 +9,8 @@
  */
 import type { GeoJSONSource, Map as MlMap } from 'maplibre-gl';
 import type { FieldLayer } from '../map/fieldLayer';
-import { AQI, CLOUD, HUMIDITY, TEMPERATURE, UV_INDEX, WIND, cssGradient, type Palette } from '../map/palettes';
+import { AQI, CLOUD, HUMIDITY, TEMPERATURE, UV_INDEX, WIND, colorAt, cssGradient, type Palette } from '../map/palettes';
+import { bars, facts, headline } from '../live/layerCard';
 import { WATER } from '../map/style';
 import { demAt, fetchBinary, type City, type Dem } from '../data';
 import type { Place } from '../geocode';
@@ -27,6 +28,8 @@ import { MICRO_NC, cityCoefs, microOffset, type MicroCoefs, type MicroVar, type 
 import { DZ0, DZ_STEP, LAPSE, LEVELS, type DetailResult, type MonthStats } from './types';
 
 const LONG_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+const MONTH_LETTERS = 'JFMAMJJASOND';
+const YEAR: Period = { kind: 'year', m: 0, d: 0 };
 /** sums are designed per month; a day is about 1/30 of one, a year 12 */
 const PER_DAY = 1 / 30.44;
 
@@ -53,6 +56,8 @@ interface AtlasVar {
   /** imperial ticks in display units, and their conversion to metric */
   ticksImperial?: Partial<Record<PeriodKind, number[]>> & { month: number[] };
   fromImperial?: (t: number) => number;
+  /** what to call the highest and lowest month on its card (default Highest, Lowest) */
+  most?: [string, string];
   /** a value for a period kind (sums: the total; counts on a day: the chance 0-1) */
   fmt: (v: number, k: PeriodKind, unit?: boolean) => string;
   unit: (k: PeriodKind) => string;
@@ -80,7 +85,7 @@ const AQI_SOLID: Palette = { stops: AQI.stops.map(([v, c]) => [v, c] as [number,
 const tempUnit = () => (units.imperial ? '°F' : '°C');
 const tempFmt = (v: number, _k?: PeriodKind, unit = true) => `${fmt('temp', v)}${unit ? (units.imperial ? 'F' : 'C') : ''}`;
 const pct = (v: number) => `${Math.round(v * 100)}%`;
-const daysFmt = (v: number, k: PeriodKind, unit = true) => (k === 'day' ? pct(v) : `${Math.round(v)}${unit ? ' days' : ''}`);
+const daysFmt = (v: number, k: PeriodKind, unit = true) => (k === 'day' ? pct(v) : `${Math.round(v)}${unit ? (Math.round(v) === 1 ? ' day' : ' days') : ''}`);
 const daysUnit = (k: PeriodKind) => (k === 'day' ? 'chance' : k === 'month' ? 'days' : 'days a year');
 const COUNT_TICKS = { day: [0, 0.25, 0.5, 0.75], month: [0, 10, 20, 31], year: [0, 100, 200, 365] };
 const amount = (v: number, k: PeriodKind, metricUnit: string, imperialUnit: string, perInch: number, unit: boolean) => {
@@ -90,7 +95,7 @@ const amount = (v: number, k: PeriodKind, metricUnit: string, imperialUnit: stri
 };
 const per = (k: PeriodKind, u: string) => (k === 'day' ? `${u} a day` : k === 'year' ? `${u} a year` : u);
 const tempVar = (id: string, label: string, hint: string, micro: MicroVar): AtlasVar => ({
-  id, label, group: 'Temperature', hint, temp: true, micro, clip: [-Infinity, Infinity],
+  id, label, group: 'Temperature', hint, temp: true, micro, clip: [-Infinity, Infinity], most: ['Warmest', 'Coldest'],
   palette: TEMPERATURE,
   ticks: { month: [-20, 0, 10, 20, 30] },
   ticksImperial: { month: [0, 32, 50, 70, 90] },
@@ -105,23 +110,23 @@ export const ATLAS_VARS: AtlasVar[] = [
   tempVar('tmin', 'Overnight low', 'Average coldest part of the night', 2),
   tempVar('feels', 'Feels-like high', 'Afternoon feels-like, with humidity and wind', 1),
   {
-    id: 'sun', label: 'Sunshine', group: 'Sun & sky', hint: 'Hours of direct sun', sum: true, clip: [0, 24],
+    id: 'sun', label: 'Sunshine', group: 'Sun & sky', hint: 'Hours of direct sun', sum: true, clip: [0, 24], most: ['Sunniest', 'Least sun'],
     palette: SUN_M, ticks: { day: [0, 4, 8, 12], month: [0, 100, 200, 300, 400], year: [0, 1000, 2000, 3000, 4000] },
     fmt: (v, k, u = true) => (k === 'day' ? `${v.toFixed(1)}${u ? ' h' : ''}` : `${Math.round(v).toLocaleString()}${u ? ' h' : ''}`),
     unit: (k) => per(k, 'hours'),
   },
   {
-    id: 'uv', label: 'UV index', group: 'Sun & sky', hint: 'Average daily peak', clip: [0, 20],
+    id: 'uv', label: 'UV index', group: 'Sun & sky', hint: 'Average daily peak', clip: [0, 20], most: ['Strongest', 'Weakest'],
     palette: UV_INDEX, ticks: { month: [0, 3, 6, 8, 11] },
     fmt: (v) => v.toFixed(v < 9.95 ? 1 : 0), unit: () => 'daily peak',
   },
   {
-    id: 'cloud', label: 'Cloud cover', group: 'Sun & sky', hint: 'Daytime average (counts thin high cloud too)', clip: [0, 100],
+    id: 'cloud', label: 'Cloud cover', group: 'Sun & sky', hint: 'Daytime average (counts thin high cloud too)', clip: [0, 100], most: ['Cloudiest', 'Clearest'],
     palette: CLOUD, ticks: { month: [0, 25, 50, 75, 100] },
     fmt: (v, _k, u = true) => `${Math.round(v)}${u ? '%' : ''}`, unit: () => '%',
   },
   {
-    id: 'precip', label: 'Precipitation', group: 'Rain & snow', hint: 'Rain plus melted snow', sum: true, clip: [0, Infinity],
+    id: 'precip', label: 'Precipitation', group: 'Rain & snow', hint: 'Rain plus melted snow', sum: true, clip: [0, Infinity], most: ['Wettest', 'Driest'],
     palette: PRECIP_M,
     ticks: { day: [0.5, 1, 2, 5, 10, 20], month: [10, 50, 100, 200, 400], year: [100, 500, 1000, 2000, 4000] },
     ticksImperial: { day: [0.02, 0.05, 0.1, 0.2, 0.5], month: [0.5, 2, 4, 8, 16], year: [5, 20, 40, 80, 160] },
@@ -130,12 +135,12 @@ export const ATLAS_VARS: AtlasVar[] = [
     unit: (k) => per(k, units.imperial ? 'in' : 'mm'),
   },
   {
-    id: 'wetdays', label: 'Wet days', group: 'Rain & snow', hint: 'Days with 1 mm (0.04 in) or more', sum: true, count: true, clip: [0, 1],
+    id: 'wetdays', label: 'Wet days', group: 'Rain & snow', hint: 'Days with 1 mm (0.04 in) or more', sum: true, count: true, clip: [0, 1], most: ['Most', 'Fewest'],
     palette: DAYS_BLUE, ticks: { day: [0, 0.2, 0.4, 0.6, 0.8], month: [0, 5, 10, 15, 20, 25], year: [0, 50, 100, 150, 200, 250, 300] },
     fmt: daysFmt, unit: daysUnit,
   },
   {
-    id: 'snowfall', label: 'Snowfall', group: 'Rain & snow', hint: 'Fresh snow (10 cm of snow per cm of water)', sum: true, clip: [0, Infinity],
+    id: 'snowfall', label: 'Snowfall', group: 'Rain & snow', hint: 'Fresh snow (10 cm of snow per cm of water)', sum: true, clip: [0, Infinity], most: ['Snowiest', 'Least snow'],
     palette: SNOWFALL_M, yearScale: 5,
     ticks: { day: [0.1, 0.3, 1, 3], month: [1, 10, 30, 100], year: [5, 50, 150, 500] },
     ticksImperial: { day: [0.05, 0.1, 0.5, 1], month: [0.5, 4, 12, 40], year: [2, 20, 60, 200] },
@@ -144,43 +149,88 @@ export const ATLAS_VARS: AtlasVar[] = [
     unit: (k) => per(k, units.imperial ? 'in' : 'cm'),
   },
   {
-    id: 'snowdays', label: 'Snow on the ground', group: 'Rain & snow', hint: 'Days with at least 1 cm of snow cover', sum: true, count: true, clip: [0, 1],
+    id: 'snowdays', label: 'Snow on the ground', group: 'Rain & snow', hint: 'Days with at least 1 cm of snow cover', sum: true, count: true, clip: [0, 1], most: ['Most', 'Fewest'],
     palette: SNOWDAYS_M, ticks: COUNT_TICKS, fmt: daysFmt, unit: daysUnit,
   },
   {
-    id: 'dew', label: 'Dew point', group: 'Air', hint: 'Daytime: under 10° dry, 16° sticky, 20°+ muggy', clip: [-Infinity, Infinity],
+    id: 'dew', label: 'Dew point', group: 'Air', hint: 'Daytime: under 10° dry, 16° sticky, 20°+ muggy', clip: [-Infinity, Infinity], most: ['Muggiest', 'Driest'],
     palette: DEW, ticks: { month: [-10, 0, 10, 16, 20] }, ticksImperial: { month: [15, 32, 50, 61, 68] }, fromImperial: (t) => fromDisplay('temp', t),
     fmt: tempFmt, unit: tempUnit,
   },
   {
-    id: 'rh', label: 'Relative humidity', group: 'Air', hint: 'Daytime average', clip: [0, 100],
+    id: 'rh', label: 'Relative humidity', group: 'Air', hint: 'Daytime average', clip: [0, 100], most: ['Most humid', 'Least humid'],
     palette: HUMIDITY, ticks: { month: [20, 40, 60, 80, 100] },
     fmt: (v, _k, u = true) => `${Math.round(v)}${u ? '%' : ''}`, unit: () => '%',
   },
   {
-    id: 'wind', label: 'Wind', group: 'Air', hint: 'Average strongest daytime wind', clip: [0, Infinity],
+    id: 'wind', label: 'Wind', group: 'Air', hint: 'Average strongest daytime wind', clip: [0, Infinity], most: ['Windiest', 'Calmest'],
     palette: WIND, ticks: { month: [5, 15, 25, 35] }, ticksImperial: { month: [5, 10, 15, 20] }, fromImperial: (t) => fromDisplay('speed', t),
     fmt: (v, _k, u = true) => fmt('speed', v, u), unit: () => (units.imperial ? 'mph' : 'km/h'),
   },
   {
-    id: 'aqi', label: 'Air quality', group: 'Air', hint: 'Average US AQI from PM2.5 (estimate, 2021–2025)', clip: [0, 500],
+    id: 'aqi', label: 'Air quality', group: 'Air', hint: 'Average US AQI from PM2.5 (estimate, 2021–2025)', clip: [0, 500], most: ['Worst', 'Cleanest'],
     palette: AQI_SOLID, ticks: { month: [0, 50, 100, 150, 200] },
     fmt: (v) => String(Math.round(v)), unit: () => 'US AQI',
   },
   {
-    id: 'goodair', label: 'Good-air days', group: 'Air', hint: 'Days with AQI 50 or less (PM2.5 ≤ 9 µg/m³, the strict 2024 US standard)', sum: true, count: true, clip: [0, 1],
+    id: 'goodair', label: 'Good-air days', group: 'Air', hint: 'Days with AQI 50 or less (PM2.5 ≤ 9 µg/m³, the strict 2024 US standard)', sum: true, count: true, clip: [0, 1], most: ['Most', 'Fewest'],
     palette: GOOD_AIR_M, ticks: COUNT_TICKS, fmt: daysFmt, unit: daysUnit,
   },
   {
-    id: 'badair', label: 'Unhealthy-air days', group: 'Air', hint: 'Days with AQI over 100: unhealthy for sensitive groups or worse', sum: true, count: true, clip: [0, 1],
+    id: 'badair', label: 'Unhealthy-air days', group: 'Air', hint: 'Days with AQI over 100: unhealthy for sensitive groups or worse', sum: true, count: true, clip: [0, 1], most: ['Most', 'Fewest'],
     palette: BAD_AIR_M, ticks: COUNT_TICKS, fmt: daysFmt, unit: daysUnit,
   },
   {
-    id: 'sst', label: 'Sea temperature', group: 'Sea', hint: 'Sea surface temperature', clip: [-2, 40],
+    id: 'sst', label: 'Sea temperature', group: 'Sea', hint: 'Sea surface temperature', clip: [-2, 40], most: ['Warmest', 'Coldest'],
     palette: TEMPERATURE, ticks: { month: [0, 10, 20, 25, 30] }, ticksImperial: { month: [32, 50, 68, 77, 86] }, fromImperial: (t) => fromDisplay('temp', t),
     fmt: tempFmt, unit: tempUnit,
   },
 ];
+
+/** The year as a curve through the 12 monthly values (e.g. temperatures), coloured by value, every month labelled. */
+function monthCurve(vals: number[], color: (v: number) => string, label: (v: number) => string, mark: number): HTMLElement {
+  const W = 340, H = 96, top = 18, bottom = 16;
+  const ok = vals.filter(Number.isFinite);
+  const lo = Math.min(...ok), hi = Math.max(...ok);
+  const pad = Math.max(0.5, (hi - lo) * 0.15);
+  const x = (i: number) => (W * (i + 0.5)) / 12;
+  const y = (v: number) => top + (1 - (v - lo + pad) / (hi - lo + 2 * pad)) * (H - top - bottom);
+  const ns = 'http://www.w3.org/2000/svg';
+  const el = <K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>) => {
+    const e = document.createElementNS(ns, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+    return e;
+  };
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, width: '100%', class: 'lc-bars' });
+  const gid = `mc${Math.random().toString(36).slice(2, 8)}`;
+  const grad = el('linearGradient', { id: gid, gradientUnits: 'userSpaceOnUse', x1: 0, x2: W, y1: 0, y2: 0 });
+  vals.forEach((v, i) => Number.isFinite(v) && grad.append(el('stop', { offset: x(i) / W, 'stop-color': color(v) })));
+  const defs = el('defs', {});
+  defs.append(grad);
+  svg.append(defs);
+  const pts = vals.map((v, i) => [i, v] as [number, number]).filter(([, v]) => Number.isFinite(v));
+  let d = `M${x(pts[0][0])},${y(pts[0][1])}`;
+  for (let k = 1; k < pts.length; k++) {
+    const cx = (x(pts[k - 1][0]) + x(pts[k][0])) / 2;
+    d += ` C${cx},${y(pts[k - 1][1])} ${cx},${y(pts[k][1])} ${x(pts[k][0])},${y(pts[k][1])}`;
+  }
+  svg.append(el('path', { d, fill: 'none', stroke: `url(#${gid})`, 'stroke-width': 3, 'stroke-linecap': 'round' }));
+  for (const [i, v] of pts) {
+    const dot = el('circle', { cx: x(i), cy: y(v), r: i === mark ? 4 : 2.4, fill: color(v), stroke: '#fff', 'stroke-width': 1.2 });
+    const tip = el('title', {});
+    tip.textContent = `${LONG_MONTHS[i]}: ${label(v)}`;
+    dot.append(tip);
+    const t = el('text', { x: x(i), y: y(v) - 7, 'text-anchor': 'middle', class: i === mark ? 'lc-val lc-mark' : 'lc-val' });
+    t.textContent = label(v);
+    svg.append(dot, t);
+  }
+  MONTH_LETTERS.split('').forEach((m, i) => {
+    const t = el('text', { x: x(i), y: H - 3, 'text-anchor': 'middle', class: i === mark ? 'lc-axis lc-mark' : 'lc-axis' });
+    t.textContent = m;
+    svg.append(t);
+  });
+  return h('div', { class: 'lc-chart' }, svg);
+}
 
 const LABEL_MS = 120;
 const SHIFTS = Array.from({ length: LEVELS }, (_, k) => -LAPSE * (DZ0 + k * DZ_STEP));
@@ -205,7 +255,6 @@ export class AtlasUI {
   private current?: { def: AtlasVar; f: AtlasField; w: Float64Array; days: number };
   private palKind: PeriodKind | null = null;
   private playTimer = 0;
-  private cardAt: [number, number] | null = null;
   private token = 0;
   private sea = false;
   private seaTex?: Float32Array;
@@ -224,6 +273,8 @@ export class AtlasUI {
     private dem: Dem,
     private setStatus: (msg: string, busy?: boolean, error?: boolean) => void,
     private base: string,
+    /** close the card and remove the map's marker */
+    private closeCard: () => void,
   ) {
     const u = new URL(location.href);
     const a = u.searchParams.get('a');
@@ -261,7 +312,7 @@ export class AtlasUI {
   exit() {
     this.active = false;
     this.stopPlay();
-    this.cardAt = null;
+    this.card = undefined;
     this.setSea(false);
     this.field.climateSqrt = true;
     const u = new URL(location.href);
@@ -274,7 +325,8 @@ export class AtlasUI {
     this.renderPanel();
     this.renderLegend();
     this.updateCities();
-    if (this.cardAt) this.showCard(...this.cardAt);
+    this.card?.paintSub?.();
+    this.renderCard();
   }
 
   private writeUrl() {
@@ -520,6 +572,8 @@ export class AtlasUI {
               this.varId = v.id;
               this.renderPanel();
               this.show();
+              if (this.card) this.card.full = false;
+              this.renderCard();
             },
           },
           v.label,
@@ -601,6 +655,7 @@ export class AtlasUI {
   /** Change the period; while scrubbing, the bar is updated in place instead of rebuilt. */
   private setPeriod(p: Period, rebuild = true) {
     this.period = p;
+    this.renderCard();
     if (rebuild) this.renderBottom();
     else {
       if (this.label) this.label.textContent = this.periodLabel();
@@ -678,41 +733,121 @@ export class AtlasUI {
   }
 
   // ---------- location card ----------
+  /**
+   * The open card: the shown variable's own card (its value for the period,
+   * the year month by month, its highest and lowest months), or the full
+   * climate of the place one tap away, as in live weather.
+   */
+  private card?: {
+    lon: number;
+    lat: number;
+    body: HTMLElement;
+    full: boolean;
+    /** repaint the place line (its elevation follows the units) */
+    paintSub?: () => void;
+    /** a variable's total (sums) or average for a period here, NaN where there is none */
+    at?: (id: string, p: Period) => number;
+    micro: boolean;
+  };
+
   async showCard(lon: number, lat: number, placeP?: Promise<Place | null>) {
-    this.cardAt = [lon, lat];
     const card = this.els.card;
     hideTip();
     clear(card);
     card.classList.remove('hidden');
-    const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => ((this.cardAt = null), card.classList.add('hidden')) }, '✕');
+    card.classList.add('compact');
+    const close = h('button', { class: 'close', 'aria-label': 'Close', onclick: () => ((this.card = undefined), this.closeCard()) }, '✕');
     const title = h('div', { class: 'place' }, '…');
     const sub = h('div', { class: 'coords' }, coordLabel(lon, lat));
     const body = h('div', {}, h('div', { class: 'desc' }, 'Loading climate…'));
     card.append(close, title, sub, body);
+    const st: NonNullable<AtlasUI['card']> = { lon, lat, body, full: false, micro: false };
+    this.card = st;
     const [elevP, place] = await Promise.all([pointElevation(lon, lat).catch(() => null), (placeP ?? Promise.resolve(null)).catch(() => null)]);
-    if (this.cardAt?.[0] !== lon || this.cardAt?.[1] !== lat) return;
+    if (this.card !== st) return;
     const elev = elevP ?? demAt(this.dem, lon, lat);
     title.textContent = place?.name ?? 'Selected location';
-    sub.textContent = [place?.detail, coordLabel(lon, lat), units.imperial ? `${Math.round(elev * 3.281)} ft` : `${Math.round(elev)} m`].filter(Boolean).join(' · ');
+    st.paintSub = () => (sub.textContent = [place?.detail, coordLabel(lon, lat), units.imperial ? `${Math.round(elev * 3.281)} ft` : `${Math.round(elev)} m`].filter(Boolean).join(' · '));
+    st.paintSub();
 
-    const ids = ['tmean', 'tmax', 'tmin', 'feels', 'sun', 'uv', 'precip', 'wetdays', 'snowfall', 'snowdays', 'dew', 'rh', 'wind', 'aqi', 'goodair', 'badair', 'sst'];
+    const ids = ATLAS_VARS.map((v) => v.id);
     const [loaded, mc] = await Promise.all([Promise.all(ids.map((id) => this.load(id).catch(() => null))), this.micro?.at(lon, lat).catch(() => null) ?? null]);
-    if (this.cardAt?.[0] !== lon || this.cardAt?.[1] !== lat) return;
-    const def = (id: string) => ATLAS_VARS.find((v) => v.id === id)!;
-    /** total (sums) or average for a period */
-    const at = (id: string, p: Period) => {
+    if (this.card !== st) return;
+    st.micro = !!mc;
+    st.at = (id: string, p: Period) => {
       const f = loaded[ids.indexOf(id)];
       if (!f) return NaN;
-      const d = def(id);
+      const d = ATLAS_VARS.find((v) => v.id === id)!;
       if (f.flags && !this.nearSea(f, lon, lat)) return NaN;
       return this.sample(d, f, periodWeights(p, f.nc), lon, lat, elev, d.sum ? periodDays(p) : 1, this.microFor(d, mc, p));
     };
-    const YEAR: Period = { kind: 'year', m: 0, d: 0 };
-    const y = (id: string) => at(id, YEAR);
-    if (!Number.isFinite(y('tmax'))) {
-      body.replaceChildren(h('div', { class: 'desc' }, 'No climate data here (open ocean or Antarctica).'));
+    this.renderCard();
+  }
+
+  /** Draw the open card for the shown variable and period (after a change of either). */
+  private renderCard() {
+    const st = this.card;
+    if (!st?.at || !st.body.isConnected) return;
+    if (!Number.isFinite(st.at('tmax', YEAR))) {
+      st.body.replaceChildren(h('div', { class: 'desc' }, 'No climate data here (open ocean or Antarctica).'));
       return;
     }
+    this.els.card.classList.toggle('compact', !st.full);
+    if (st.full) {
+      const back = h('button', { class: 'lc-switch back', onclick: () => ((st.full = false), this.renderCard()) }, `‹ ${this.def.label}`);
+      st.body.replaceChildren(back, ...this.fullCard(st.at, st.micro));
+    } else {
+      const more = h('button', { class: 'lc-switch', onclick: () => ((st.full = true), this.renderCard()) }, 'Full climate ›');
+      st.body.replaceChildren(...this.varCard(st.at), more);
+    }
+  }
+
+  /** The shown variable here: its value for the period, the year month by month, its extremes. */
+  private varCard(at: (id: string, p: Period) => number): Node[] {
+    const d = this.def, p = this.period, k = p.kind;
+    const fin = (v: number) => Number.isFinite(v);
+    const v = at(d.id, p);
+    const months = MONTH_START.slice(0, 12).map((s0, m) => at(d.id, { kind: 'month', m, d: s0 + 14 }));
+    const title = h('div', { class: 'lc-title' }, d.label);
+    if (!months.some(fin))
+      return [title, h('div', { class: 'desc' }, d.id === 'sst' ? 'No sea nearby.' : 'No data for this spot.')];
+    const yearPal = d.sum ? scaled(d.palette, d.yearScale ?? 12) : d.palette;
+    const year = k === 'year' ? v : at(d.id, YEAR);
+    const mark = k === 'year' ? -1 : p.m;
+    const ok = months.map((x, m) => [x, m] as [number, number]).filter(([x]) => fin(x));
+    const hi = ok.reduce((a, b) => (b[0] > a[0] ? b : a)), lo = ok.reduce((a, b) => (b[0] < a[0] ? b : a));
+    const [most, least] = d.most ?? ['Highest', 'Lowest'];
+    const curve = d.temp || d.id === 'dew' || d.id === 'sst';
+    const top = Math.max(...ok.map(([x]) => x)) || 1;
+    // amounts that round to nothing read as none, and months with next to nothing go unlabelled
+    const zero = (x: number) => /^0([.,]0+)?$/.test(d.fmt(x, 'month', false));
+    const say = (x: number) => (d.sum && !d.count && zero(x) ? 'None' : d.fmt(x, 'month'));
+    const chart = curve
+      ? monthCurve(months, (x) => colorAt(d.palette, x), (x) => d.fmt(x, 'month', false), mark)
+      : bars(
+          months.map((x, m) => ({
+            t: m, v: fin(x) ? x : 0, color: colorAt(d.palette, fin(x) ? x : 0), label: fin(x) && x >= top * 0.03 && !zero(x) ? d.fmt(x, 'month', false) : undefined,
+            mark: m === mark, axis: MONTH_LETTERS[m], name: LONG_MONTHS[m],
+          })),
+          { max: top, every: 1, height: 84 },
+        );
+    return [
+      title,
+      headline(fin(v) ? d.fmt(v, k) : '—', this.periodLabel(), d.hint, fin(v) ? colorAt(this.palette(), v) : undefined),
+      chart,
+      h('div', { class: 'lc-legend' }, `Month by month (${d.sum ? `total, ${d.unit('month')}` : d.unit('month')})`),
+      facts(
+        ...(k !== 'year' && fin(year) ? [['Whole year', d.fmt(year, 'year'), undefined, colorAt(yearPal, year)] as [string, string, string?, string?]] : []),
+        [most, say(hi[0]), LONG_MONTHS[hi[1]], colorAt(d.palette, hi[0])],
+        [least, say(lo[0]), LONG_MONTHS[lo[1]], colorAt(d.palette, lo[0])],
+      ),
+    ];
+  }
+
+  /** The full climate of the place: the year at a glance and every variable month by month. */
+  private fullCard(at: (id: string, p: Period) => number, micro: boolean): Node[] {
+    const def = (id: string) => ATLAS_VARS.find((v) => v.id === id)!;
+    const y = (id: string) => at(id, YEAR);
     const stat = (k: string, v: string, n?: string) => h('div', { class: 'stat' }, h('div', { class: 'k' }, k), h('div', { class: 'v' }, v), n ? h('div', { class: 'n' }, n) : null);
     const fin = (v: number) => Number.isFinite(v);
     const tiles = [
@@ -740,15 +875,15 @@ export class AtlasUI {
         aqi: v('aqi'), goodAirDays: v('goodair'), badAirDays: v('badair'), wind: v('wind'), sst: v('sst'),
       };
     });
-    body.replaceChildren(
+    return [
       h('div', { class: 'stats' }, ...tiles),
       h('h3', {}, 'Month by month'),
       monthTable({ months } as DetailResult),
       h(
         'div',
         { class: 'note' },
-        `Normals from 25 years of weather (ERA5 reanalysis, 2001–2025), blended from nearby ~100 km grid cells with temperatures, rain and snow adjusted to this spot’s elevation${mc ? ', and temperatures to its local microclimate (WorldClim)' : ''}. Air quality: NOAA’s aerosol model matched to satellite and ground-monitor estimates (2021–2025). Hover a cell for details.`,
+        `Normals from 25 years of weather (ERA5 reanalysis, 2001–2025), blended from nearby ~100 km grid cells with temperatures, rain and snow adjusted to this spot’s elevation${micro ? ', and temperatures to its local microclimate (WorldClim)' : ''}. Air quality: NOAA’s aerosol model matched to satellite and ground-monitor estimates (2021–2025). Hover a cell for details.`,
       ),
-    );
+    ];
   }
 }
